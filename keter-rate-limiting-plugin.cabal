@@ -1,0 +1,48 @@
+cabal-version:      3.0
+name:               keter-rate-limiting-plugin
+version:            0.1.0.0
+synopsis:           Keter rate limiting plugin.
+-- description:
+homepage:
+    https://github.com/Oleksandr-Zhabenko/keter-rate-limiting-plugin
+
+license:            MIT
+license-file:       LICENSE
+author:             Oleksandr Zhabenko
+maintainer:         oleksandr.zhabenko@yahoo.com
+copyright:          2025 Oleksandr Zhabenko
+category:           Network
+build-type:         Simple
+extra-doc-files:    CHANGELOG.md
+-- extra-source-files:
+
+common warnings
+    ghc-options: -Wall
+
+library
+    import:           warnings
+    exposed-modules:  Keter.RateLimiter, Keter.RateLimiter.Cache, Keter.RateLimiter.Notifications
+    -- other-modules:
+    -- other-extensions:
+    build-depends:    
+          base                    >=4        && <5
+          , text                  >=1.2.5    && <3.0
+          , time                  >=1.9.3    && <2.0
+          , hashable              >=1.4.2.0  && <2
+          , cache                 >=0.1.3.0  && <1
+          , clock                 >=0.8.3    && <1
+          , containers            ^>=0.6.4   || ^>=0.7     
+    hs-source-dirs:   src
+    default-language: Haskell2010
+
+test-suite keter-rate-limiting-plugin-test
+    import:           warnings
+    default-language: Haskell2010
+    -- other-modules:
+    -- other-extensions:
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   test
+    main-is:          Main.hs
+    build-depends:
+        base >=4 && <5
+        , keter-rate-limiting-plugin
