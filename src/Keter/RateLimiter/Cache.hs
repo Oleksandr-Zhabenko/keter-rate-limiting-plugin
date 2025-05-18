@@ -1,160 +1,215 @@
 {-|
 Copyright (c) 2025 Oleksandr Zhabenko
-  
-This file is a ported to Haskell language code with some simlifications of rack-attack 
+
+This file is a ported to Haskell language code with some simplifications of rack-attack
 https://github.com/rack/rack-attack/blob/main/lib/rack/attack/cache.rb
-and is based on the structure of the original code of 
+and is based on the structure of the original code of
 rack-attack, Copyright (c) 2016 by Kickstarter, PBC, under the MIT License.
+
+Oleksandr Zhabenko added several implementations of the window algorithm: sliding window, token bucket window, leaky bucket window alongside with the initial count algorithm using AI chatbots.
 
 This implementation is released under the MIT License.
  -}
 
-
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE FunctionalDependencies #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE InstanceSigs #-}
-{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE KindSignatures #-}
+{-# LANGUAGE DeriveGeneric #-}
 
 module Keter.RateLimiter.Cache
-  ( Cache
+  ( Cache(..)
   , CacheStore(..)
-  , newCache
-  , count
+  , InMemoryStore
+  , newInMemoryStore
   , readCache
   , writeCache
-  , resetCount
   , deleteCache
+  , incStore
+  , count
   , reset
-  , InMemoryStore
+  , newCache
   , createInMemoryStore
   ) where
 
 import Control.Monad.IO.Class (MonadIO, liftIO)
-import Data.Time (UTCTime, getCurrentTime)
-import Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
+import Data.Aeson (FromJSON, ToJSON, decodeStrict, encode)
+import qualified Data.ByteString.Char8 as BS
+import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
 import qualified Data.Text as T
-import Data.Hashable (Hashable)
+import Data.Text.Encoding (encodeUtf8, decodeUtf8')
 import qualified Data.Cache as C
-import System.Clock (TimeSpec(..))
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
-import Control.Exception (throwIO, Exception)
-import Data.Int (Int64)
+import GHC.Generics (Generic)
+import System.Clock (TimeSpec(..))
+import Data.Maybe (fromMaybe)
+import GHC.TypeLits (Symbol)
+import Data.Proxy (Proxy(..))
+import Keter.RateLimiter.LeakyBucketState
 
--- | Custom exception types.
-data CacheError
-  = MissingStoreError Text
-  | MisconfiguredStoreError Text
-  | IncompatibleStoreError Text
-  deriving (Show)
+-- Import to support unsafePerformIO
+import System.IO.Unsafe (unsafePerformIO)
 
-instance Exception CacheError
-
--- | Type synonyms for Key and Value.
-type Key = Text
-type Value = Int
-
--- | A typeclass to abstract the store operations.
-class (MonadIO m) => CacheStore store m where
-  readStore  :: store -> Text -> Key -> m (Maybe Value)
-  writeStore :: store -> Text -> Key -> Value -> Int -> m ()
-  incStore   :: store -> Text -> Key -> Int -> m (Maybe Int)
-  deleteStore:: store -> Text -> Key -> m ()
-
--- | The main Cache type.
+-- | Cache wrapper around the store and a key prefix.
 data Cache store = Cache
   { cachePrefix :: Text
   , cacheStore  :: store
   }
 
--- | InMemoryStore: Holds an IORef to the Data.Cache.
-newtype InMemoryStore = InMemoryStore (IORef (C.Cache Text Int))
+-- | CacheStore class for abstracting storage backends.
+class MonadIO m => CacheStore store v m | store -> v where
+  readStore   :: store -> Text -> Text -> m (Maybe v)
+  writeStore  :: store -> Text -> Text -> v -> Int -> m ()
+  deleteStore :: store -> Text -> Text -> m ()
 
--- | Create an InMemoryStore.
-createInMemoryStore :: IO InMemoryStore
-createInMemoryStore = InMemoryStore <$> (C.newCache Nothing >>= newIORef)
+-- | Create new cache with prefix and store
+newCache :: Text -> store -> Cache store
+newCache prefix store = Cache
+  { cachePrefix = prefix
+  , cacheStore = store
+  }
 
--- | Instance for InMemoryStore, using IO.
-instance CacheStore InMemoryStore IO where
-  readStore :: InMemoryStore -> Text -> Text -> IO (Maybe Int)
+-- | Create new in-memory store
+createInMemoryStore :: IO (InMemoryStore a)
+createInMemoryStore = do
+  cacheRef <- C.newCache Nothing >>= newIORef
+  return $ InMemoryStore cacheRef
+
+-- | In-memory store using IORef-wrapped Data.Cache with type-level tag
+-- to differentiate instances for different value types
+data InMemoryStore (a :: Symbol) = InMemoryStore (IORef (C.Cache Text Text))
+
+-- | Constructor for in-memory store with explicit type tag
+newInMemoryStore :: InMemoryStore a
+newInMemoryStore = unsafePerformIO $ C.newCache Nothing >>= fmap InMemoryStore . newIORef
+
+-- | Instance for storing Int lists (timestamps)
+instance CacheStore (InMemoryStore "timestamps") [Int] IO where
   readStore (InMemoryStore ref) _prefix key = do
-      cache <- readIORef ref
-      C.lookup cache key
+    cache <- readIORef ref
+    mval <- C.lookup cache key
+    case mval of
+      Nothing -> return Nothing
+      Just txt -> case decodeStrict (encodeUtf8 txt) of
+        Nothing -> return Nothing
+        Just val -> return (Just val)
 
-  writeStore :: InMemoryStore -> Text -> Text -> Int -> Int -> IO ()
-  writeStore (InMemoryStore ref) _prefix key value expires_in = do
-      cache <- readIORef ref
-      let expiration = Just (TimeSpec 0 (fromIntegral expires_in * 1000000000))
-      C.insert' cache expiration key value
+  writeStore (InMemoryStore ref) _prefix key val expiresIn = do
+    cache <- readIORef ref
+    let bs = encode val
+        strictBs = LBS.toStrict bs
+        txt = decodeUtf8' strictBs
+    case txt of
+      Left _ -> return ()
+      Right vtxt -> do
+        let expiration = Just (TimeSpec 0 (fromIntegral expiresIn * 1000000000))
+        C.insert' cache expiration key vtxt
 
-  incStore :: InMemoryStore -> Text -> Text -> Int -> IO (Maybe Int)
-  incStore (InMemoryStore ref) prefix key expires_in = do
-      cache <- readIORef ref
-      maybeVal <- C.lookup cache key
-      case maybeVal of
-        Nothing -> do
-          writeStore (InMemoryStore ref) prefix key 1 expires_in
-          return $ Just 1
-        Just val -> do
-          let newVal = val + 1
-          writeStore (InMemoryStore ref) prefix key newVal expires_in
-          return $ Just newVal
-
-  deleteStore :: InMemoryStore -> Text -> Text -> IO ()
   deleteStore (InMemoryStore ref) _prefix key = do
-      cache <- readIORef ref
-      C.delete cache key
+    cache <- readIORef ref
+    C.delete cache key
 
--- | Create a new cache.
-newCache :: (CacheStore store IO) => Text -> store -> Cache store
-newCache prefix store = Cache { cachePrefix = prefix, cacheStore = store }
+-- | Instance for storing Int counters
+instance CacheStore (InMemoryStore "counter") Int IO where
+  readStore (InMemoryStore ref) _prefix key = do
+    cache <- readIORef ref
+    mval <- C.lookup cache key
+    case mval of
+      Nothing -> return Nothing
+      Just txt -> case decodeStrict (encodeUtf8 txt) of
+        Nothing -> return Nothing
+        Just val -> return (Just val)
 
--- | Calculate the key and expiry time.
-keyAndExpiry :: (MonadIO m) => Text -> Text -> Int -> m (Text, Int)
-keyAndExpiry prefix unprefixedKey period = do
-  now <- liftIO getCurrentTime
-  let epochTime = floor (utcTimeToPOSIXSeconds now)
-  let expires_in = period - (epochTime `mod` period) + 1
-  let key = prefix <> ":" <> T.pack (show (epochTime `div` period)) <> ":" <> unprefixedKey
-  return (key, expires_in)
+  writeStore (InMemoryStore ref) _prefix key val expiresIn = do
+    cache <- readIORef ref
+    let bs = encode val
+        strictBs = LBS.toStrict bs
+        txt = decodeUtf8' strictBs
+    case txt of
+      Left _ -> return ()
+      Right vtxt -> do
+        let expiration = Just (TimeSpec 0 (fromIntegral expiresIn * 1000000000))
+        C.insert' cache expiration key vtxt
 
--- | Count (increment) a key.
-count :: (CacheStore store IO) => Cache store -> Text -> Int -> IO Int
-count cache unprefixedKey period = do
-  (key, expires_in) <- keyAndExpiry (cachePrefix cache) unprefixedKey period
-  maybeResult <- incStore (cacheStore cache) (cachePrefix cache) key expires_in
-  case maybeResult of
-    Just result -> return result
-    Nothing     -> do
-      writeStore (cacheStore cache) (cachePrefix cache) key 1 expires_in
-      return 1
+  deleteStore (InMemoryStore ref) _prefix key = do
+    cache <- readIORef ref
+    C.delete cache key
 
--- | Read a key.
-readCache :: (CacheStore store IO) => Cache store -> Text -> IO (Maybe Int)
+-- | Instance for storing Text values (for token bucket)
+instance CacheStore (InMemoryStore "token_bucket") Text IO where
+  readStore (InMemoryStore ref) _prefix key = do
+    cache <- readIORef ref
+    C.lookup cache key
+
+  writeStore (InMemoryStore ref) _prefix key val expiresIn = do
+    cache <- readIORef ref
+    let expiration = Just (TimeSpec 0 (fromIntegral expiresIn * 1000000000))
+    C.insert' cache expiration key val
+
+  deleteStore (InMemoryStore ref) _prefix key = do
+    cache <- readIORef ref
+    C.delete cache key
+
+instance CacheStore (InMemoryStore "leaky_bucket") LeakyBucketState IO where
+  readStore (InMemoryStore ref) _prefix key = do
+    cache <- readIORef ref
+    mval <- C.lookup cache key
+    case mval of
+      Nothing -> return Nothing
+      Just txt -> case decodeStrict (encodeUtf8 txt) of
+        Nothing -> return Nothing
+        Just val -> return (Just val)
+
+  writeStore (InMemoryStore ref) _prefix key val expiresIn = do
+    cache <- readIORef ref
+    let bs = encode val
+        strictBs = LBS.toStrict bs
+        txt = decodeUtf8' strictBs
+    case txt of
+      Left _ -> return ()
+      Right vtxt -> do
+        let expiration = Just (TimeSpec 0 (fromIntegral expiresIn * 1000000000))
+        C.insert' cache expiration key vtxt
+
+  deleteStore (InMemoryStore ref) _prefix key = do
+    cache <- readIORef ref
+    C.delete cache key
+
+-- | Read from cache with prefixed key.
+readCache :: (CacheStore store v IO) => Cache store -> Text -> IO (Maybe v)
 readCache cache unprefixedKey =
   readStore (cacheStore cache) (cachePrefix cache) (cachePrefix cache <> ":" <> unprefixedKey)
 
--- | Write a key.
-writeCache :: (CacheStore store IO) => Cache store -> Text -> Int -> Int -> IO ()
-writeCache cache unprefixedKey value expires_in =
-  writeStore (cacheStore cache) (cachePrefix cache) (cachePrefix cache <> ":" <> unprefixedKey) value expires_in
+-- | Write to cache with prefixed key.
+writeCache :: (CacheStore store v IO) => Cache store -> Text -> v -> Int -> IO ()
+writeCache cache unprefixedKey val expiresIn =
+  writeStore (cacheStore cache) (cachePrefix cache) (cachePrefix cache <> ":" <> unprefixedKey) val expiresIn
 
--- | Reset the count for a key (delete it).
-resetCount :: (CacheStore store IO) => Cache store -> Text -> Int -> IO ()
-resetCount cache unprefixedKey period = do
-  (key, _) <- keyAndExpiry (cachePrefix cache) unprefixedKey period
-  deleteStore (cacheStore cache) (cachePrefix cache) key
-
--- | Delete a key.
-deleteCache :: (CacheStore store IO) => Cache store -> Text -> IO ()
+-- | Delete a key from cache with prefix.
+deleteCache :: (CacheStore store v IO) => Cache store -> Text -> IO ()
 deleteCache cache unprefixedKey =
   deleteStore (cacheStore cache) (cachePrefix cache) (cachePrefix cache <> ":" <> unprefixedKey)
 
--- | Reset the entire cache.
-reset :: (CacheStore store IO) => Cache store -> IO ()
-reset _ = do
-  liftIO $ putStrLn "Warning: reset is not fully implemented. Clearing entire cache!"
-  return ()
+-- | Increment a numeric cache value, or initialize if missing.
+incStore :: (CacheStore store v IO, Num v) => Cache store -> Text -> Int -> IO v
+incStore cache unprefixedKey expiresIn = do
+  let fullKey = cachePrefix cache <> ":" <> unprefixedKey
+  mval <- readStore (cacheStore cache) (cachePrefix cache) fullKey
+  let newVal = maybe 1 (+1) mval
+  writeStore (cacheStore cache) (cachePrefix cache) fullKey newVal expiresIn
+  return newVal
+
+-- | Count operation - alias for incStore with a specific timeout
+count :: (CacheStore store v IO, Num v) => Cache store -> Text -> IO v
+count cache key = incStore cache key 3600  -- Default expiry of 1 hour
+
+-- | Reset a cache key
+reset :: (CacheStore store v IO) => Cache store -> Text -> IO ()
+reset cache key = deleteCache cache key
+

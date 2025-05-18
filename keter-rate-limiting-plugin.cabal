@@ -21,11 +21,13 @@ common warnings
 
 library
     import:           warnings
-    exposed-modules:  Keter.RateLimiter, Keter.RateLimiter.Cache, Keter.RateLimiter.Notifications
+    exposed-modules:  Keter.RateLimiter, Keter.RateLimiter.Cache, Keter.RateLimiter.SlidingWindow, Keter.RateLimiter.TokenBucket, Keter.RateLimiter.LeakyBucket, Keter.RateLimiter.LeakyBucketState, Keter.RateLimiter.Notifications
     -- other-modules:
     -- other-extensions:
     build-depends:    
           base                    >=4        && <5
+          , aeson                 >=2.0.0 && <2.2 || >=2.2.0.0 && <2.3
+          , bytestring            >=0.10.12 && <0.12 || >=0.12.0.0 && <0.13
           , text                  >=1.2.5    && <3.0
           , time                  >=1.9.3    && <2.0
           , hashable              >=1.4.2.0  && <2

@@ -5,189 +5,177 @@ This file is a ported to Haskell language code with some simlifications of rack-
 https://github.com/rack/rack-attack/blob/main/lib/rack/attack.rb
 and is based on the structure of the original code of 
 rack-attack, Copyright (c) 2016 by Kickstarter, PBC, under the MIT License.
+Oleksandr Zhabenko added several implementations of the window algorithm: sliding window, token bucket window, leaky bucket window alongside with the initial count algorithm using AI chatbots.
 
 This implementation is released under the MIT License.
  -}
 
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE NumericUnderscores #-}
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DataKinds #-}
 
 module Keter.RateLimiter
-  ( Env
+  ( Env(..)
   , Response
   , App
   , Request(..)
   , attackMiddleware
   , instrument
-  , Configuration
+  , Configuration(..)
   , defaultConfiguration
   , initConfig
   , addThrottle
+  , ThrottleConfig(..)
+  , Algorithm(..)
   ) where
 
 import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
 import Data.Maybe (fromMaybe)
-import Data.Hashable (Hashable(..))
-import Data.Char (isSpace, toLower)
-import Control.Exception (Exception)
-import System.Clock (TimeSpec(..), toNanoSecs)
-import Prelude hiding (lookup)
-
--- Import the Cache module
-import Keter.RateLimiter.Cache (Cache, count, readCache, reset, InMemoryStore, newCache, createInMemoryStore)
-
--- Use Data.Text
 import qualified Data.Text as T
 import Data.Text (Text)
 
--- Import our Notifications module
+import Keter.RateLimiter.Cache
+  ( Cache(..)
+  , InMemoryStore
+  , count
+  , reset
+  , newCache
+  , createInMemoryStore
+  )
+
+import qualified Keter.RateLimiter.SlidingWindow as SW
+import qualified Keter.RateLimiter.TokenBucket as TB
+import qualified Keter.RateLimiter.LeakyBucket as LB
 import qualified Keter.RateLimiter.Notifications as Notifications
 
---------------------------------------------------------------------------------
--- Basic Types and Request Handling
---------------------------------------------------------------------------------
-type Env = Map Text Text
-type Response = (Int, [(Text, Text)], Text)
-type App = Env -> IO Response
+-- | Application environment with configuration and all required caches
+data Env = Env
+  { envConfig           :: Configuration
+  , envCounterCache     :: Cache (InMemoryStore "counter")
+  , envTimestampCache   :: Cache (InMemoryStore "timestamps")
+  , envTokenBucketCache :: Cache (InMemoryStore "token_bucket")
+  , envLeakyBucketCache :: Cache (InMemoryStore "leaky_bucket")   -- Added
+  }
 
-data Request = Request { reqEnv :: Env }
-  deriving (Show)
+type Response = Text
+type App = IO
 
-newRequest :: Env -> Request
-newRequest = Request
+data Request = Request
+  { requestMethod  :: Text
+  , requestPath    :: Text
+  , requestHost    :: Text
+  , requestIP      :: Text
+  , requestHeaders :: Map Text Text
+  } deriving (Show, Eq)
 
-normalizePath :: Text -> Text
-normalizePath path = path
+-- Add LeakyBucket to Algorithm
+data Algorithm = FixedWindow | SlidingWindow | TokenBucket | LeakyBucket deriving (Show, Eq)
 
---------------------------------------------------------------------------------
--- Error Types
---------------------------------------------------------------------------------
-data RateLimiterError
-  = Error Text
-  | MisconfiguredStoreError Text
-  | MissingStoreError Text
-  | IncompatibleStoreError Text
-  deriving (Show)
-
-instance Exception RateLimiterError
-
---------------------------------------------------------------------------------
--- Global Settings and Configuration
---------------------------------------------------------------------------------
-enabled :: Bool
-enabled = True
-
-throttleDiscriminatorNormalizer :: Text -> Text
-throttleDiscriminatorNormalizer discriminator =
-  T.map toLower (T.strip discriminator)
-
--- | The configuration now also holds a cache and a list of throttle rules.
 data Configuration = Configuration
-  { safelisted           :: Request -> Bool
-  , blocklisted          :: Request -> Bool
-  , throttled            :: Request -> IO Bool
-  , tracked              :: Request -> IO ()
-  , blocklistedResponse  :: Maybe (Env -> IO Response)
-  , blocklistedResponder :: Request -> IO Response
-  , throttledResponse    :: Maybe (Env -> IO Response)
-  , throttledResponder   :: Request -> IO Response
-  , configThrottles      :: [Throttle]
-  , cache                :: Cache InMemoryStore
+  { configThrottles :: Map Text ThrottleConfig
+  , configNotifier  :: Notifications.Notifier
   }
 
--- | A throttle rule.
-data Throttle = Throttle
-  { throttleName          :: Text
-  , throttleLimit         :: Int
-  , throttlePeriod        :: TimeSpec
-  , throttleDiscriminator :: Request -> Text
-  , throttleMatch         :: Request -> Bool
+data ThrottleConfig = ThrottleConfig
+  { throttleLimit     :: Int
+  , throttlePeriod    :: Int
+  , throttleCondition :: Request -> Bool
+  , throttleKeyFn     :: Request -> Text
+  , throttleAlgorithm :: Algorithm
   }
 
--- | Check if a request is throttled by applying all throttle rules.
-defaultThrottled :: Configuration -> Request -> IO Bool
-defaultThrottled config req = do
-    let applicable = filter (\t -> throttleMatch t req) (configThrottles config)
-    results <- mapM (checkThrottle config req) applicable
-    return $ or results
-  where
-    checkThrottle :: Configuration -> Request -> Throttle -> IO Bool
-    checkThrottle config req throttle = do
-      let key = throttleDiscriminator throttle req <> "_" <> throttleName throttle
-          periodSeconds = fromIntegral (toNanoSecs (throttlePeriod throttle) `div` 1_000_000_000)
-      countVal <- count (cache config) key periodSeconds
-      return $ countVal > throttleLimit throttle
+defaultConfiguration :: Configuration
+defaultConfiguration = Configuration
+  { configThrottles = Map.empty
+  , configNotifier = Notifications.noopNotifier
+  }
 
--- | Create a default configuration given a cache.
-defaultConfiguration :: Cache InMemoryStore -> Configuration
-defaultConfiguration cacheInst = config
-  where
-    config = Configuration
-      { safelisted           = \_ -> False
-      , blocklisted          = \_ -> False
-      , throttled            = defaultThrottled config
-      , tracked              = \_ -> return ()
-      , blocklistedResponse  = Nothing
-      , blocklistedResponder = \_ -> return (403, [], "Blocked")
-      , throttledResponse    = Nothing
-      , throttledResponder   = \_ -> return (429, [], "Throttled")
-      , configThrottles      = []
-      , cache                = cacheInst
-      }
+initConfig :: Configuration -> IO Env
+initConfig config = do
+  counterStore <- createInMemoryStore
+  timestampStore <- createInMemoryStore
+  tokenBucketStore <- createInMemoryStore
+  leakyBucketStore <- createInMemoryStore       -- Added
+  let counterCache     = newCache "rate_limiter" counterStore
+      timestampCache   = newCache "timestamps" timestampStore
+      tokenBucketCache = newCache "token_bucket" tokenBucketStore
+      leakyBucketCache = newCache "leaky_bucket" leakyBucketStore   -- Added
+  return $ Env
+    { envConfig = config
+    , envCounterCache = counterCache
+    , envTimestampCache = timestampCache
+    , envTokenBucketCache = tokenBucketCache
+    , envLeakyBucketCache = leakyBucketCache         -- Added
+    }
 
-initConfig :: IO Configuration
-initConfig = do
-    inMemoryStore <- createInMemoryStore
-    let cacheInst = newCache "Keter.RateLimiter" inMemoryStore
-    return $ defaultConfiguration cacheInst
+addThrottle :: Text -> ThrottleConfig -> Configuration -> Configuration
+addThrottle name cfg conf =
+  conf { configThrottles = Map.insert name cfg (configThrottles conf) }
 
--- | Add a throttle rule to an existing configuration.
-addThrottle :: Text -> Int -> TimeSpec -> (Request -> Text) -> (Request -> Bool) -> Configuration -> Configuration
-addThrottle name limit period discriminator matchFunc config =
-    config { configThrottles = Throttle name limit period discriminator matchFunc : configThrottles config }
+attackMiddleware :: Env -> Request -> App Response -> App Response
+attackMiddleware env req app = do
+  blocked <- checkThrottles env req
+  if blocked
+    then return "Rate limit exceeded"
+    else instrument env req app
 
---------------------------------------------------------------------------------
--- Middleware
---------------------------------------------------------------------------------
-attackMiddleware :: Configuration -> App -> App
-attackMiddleware config app env = do
-  if not enabled || Map.lookup "Keter.RateLimiter.called" env == Just "true"
-    then app env
+instrument :: Env -> Request -> App Response -> App Response
+instrument _env _req app = app  -- Placeholder
+
+checkThrottles :: Env -> Request -> App Bool
+checkThrottles env req = do
+  let throttles = configThrottles (envConfig env)
+  results <- mapM (checkThrottle env req) (Map.toList throttles)
+  return $ or results
+
+checkThrottle :: Env -> Request -> (Text, ThrottleConfig) -> App Bool
+checkThrottle env req (name, config) =
+  if not (throttleCondition config req)
+    then return False
     else do
-      let env1 = Map.insert "Keter.RateLimiter.called" "true" env
-          path = fromMaybe "" (Map.lookup "PATH_INFO" env1)
-          normalizedPath = normalizePath path
-          env2 = Map.insert "PATH_INFO" normalizedPath env1
-          req = newRequest env2
-          -- Build a payload with Text values, not String
-          payload = [("path", normalizedPath)]  -- Fixed: using Text not String
-          
-      -- Use separate notification and function call to avoid type issues
-      Notifications.instrumentNotification "Keter.RateLimiter.request" payload (\_ -> return ())
-      
-      -- Process the request
-      if safelisted config req
-        then app env2
-        else if blocklisted config req
-          then case blocklistedResponse config of
-                 Just respFunc -> respFunc env2
-                 Nothing       -> blocklistedResponder config req
-          else do
-            isThrottled <- throttled config req
-            if isThrottled
-              then case throttledResponse config of
-                     Just respFunc -> respFunc env2
-                     Nothing       -> throttledResponder config req
-              else do
-                tracked config req
-                app env2
+      let key = throttleKeyFn config req
+          fullKey = name <> ":" <> key
+      isBlocked <- case throttleAlgorithm config of
+        FixedWindow -> do
+          currentCount <- count (envCounterCache env) fullKey
+          return (currentCount > fromIntegral (throttleLimit config))
 
---------------------------------------------------------------------------------
--- Instrumentation
---------------------------------------------------------------------------------
--- | A simple instrumentation function that wraps a request.
-instrument :: Request -> IO ()
-instrument req =
-  -- Here we use the Notifications module with an empty list
-  Notifications.instrumentNotification "Keter.RateLimiter" [] (\_ -> return ())
+        SlidingWindow -> do
+          allowed <- SW.allowRequest
+            (envTimestampCache env)
+            fullKey
+            (throttleLimit config)
+            (throttlePeriod config)
+          return (not allowed)
+
+        TokenBucket -> do
+          let refillRate = fromIntegral (throttleLimit config) / fromIntegral (throttlePeriod config)
+          allowed <- TB.allowRequest
+            (envTokenBucketCache env)
+            fullKey
+            (throttleLimit config)
+            refillRate
+          return (not allowed)
+
+        LeakyBucket -> do
+          let leakRate = fromIntegral (throttleLimit config) / fromIntegral (throttlePeriod config)
+          allowed <- LB.allowRequest
+            (envLeakyBucketCache env)
+            fullKey
+            (throttleLimit config)
+            leakRate
+          return (not allowed)
+
+      when isBlocked $
+        Notifications.notify
+          (configNotifier (envConfig env))
+          name
+          req
+          (throttleLimit config)
+
+      return isBlocked
+
+-- | Helper
+when :: Monad m => Bool -> m () -> m ()
+when p action = if p then action else return ()
