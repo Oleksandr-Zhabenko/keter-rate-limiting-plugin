@@ -23,6 +23,7 @@ main = do
         , throttlePeriod = 60  -- 60 seconds
         , throttleCondition = const True  -- Apply to all requests
         , throttleKeyFn = requestIP  -- Key by IP address
+        , throttleAlgorithm = FixedWindow -- Using the fixed window algorithm
         }
       
       -- Path-specific throttle
@@ -31,13 +32,13 @@ main = do
         , throttlePeriod = 300  -- 5 minutes
         , throttleCondition = \req -> requestPath req == "/login"
         , throttleKeyFn = \req -> requestIP req <> ":" <> requestPath req
+        , throttleAlgorithm = SlidingWindow -- Using the sliding window algorithm
         }
   
   -- Create configuration with console notifications
-  let config = defaultConfiguration
-        { configNotifier = consoleNotifier }
-        `addThrottle` "ip-throttle" $ ipThrottleConfig
-        `addThrottle` "login-throttle" $ loginThrottleConfig
+  let baseConfig = defaultConfiguration { configNotifier = consoleNotifier }
+      configWithIpThrottle = addThrottle "ip-throttle" ipThrottleConfig baseConfig
+      config = addThrottle "login-throttle" loginThrottleConfig configWithIpThrottle
   
   -- Initialize environment
   env <- initConfig config
