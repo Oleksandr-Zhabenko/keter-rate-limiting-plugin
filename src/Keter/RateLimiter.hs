@@ -27,6 +27,7 @@ module Keter.RateLimiter
   , addThrottle
   , ThrottleConfig(..)
   , Algorithm(..)
+  , cacheResetAll
   ) where
 
 import qualified Data.Map.Strict as Map
@@ -42,6 +43,8 @@ import Keter.RateLimiter.Cache
   , reset
   , newCache
   , createInMemoryStore
+  , clearInMemoryStore
+  , cacheReset
   )
 
 import qualified Keter.RateLimiter.SlidingWindow as SW
@@ -175,6 +178,13 @@ checkThrottle env req (name, config) =
           (throttleLimit config)
 
       return isBlocked
+
+cacheResetAll :: Env -> IO ()
+cacheResetAll env = do
+  cacheReset (envCounterCache env)
+  cacheReset (envTimestampCache env)
+  cacheReset (envTokenBucketCache env)
+  cacheReset (envLeakyBucketCache env)
 
 -- | Helper
 when :: Monad m => Bool -> m () -> m ()

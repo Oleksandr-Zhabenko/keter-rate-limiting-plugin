@@ -35,6 +35,8 @@ module Keter.RateLimiter.Cache
   , reset
   , newCache
   , createInMemoryStore
+  , clearInMemoryStore
+  , cacheReset
   ) where
 
 import Control.Monad.IO.Class (MonadIO, liftIO)
@@ -212,4 +214,12 @@ count cache key = incStore cache key 3600  -- Default expiry of 1 hour
 -- | Reset a cache key
 reset :: (CacheStore store v IO) => Cache store -> Text -> IO ()
 reset cache key = deleteCache cache key
+
+clearInMemoryStore :: InMemoryStore a -> IO ()
+clearInMemoryStore (InMemoryStore ref) = do
+  cache <- readIORef ref
+  C.purge cache
+
+cacheReset :: Cache (InMemoryStore a) -> IO ()
+cacheReset = clearInMemoryStore . cacheStore
 
