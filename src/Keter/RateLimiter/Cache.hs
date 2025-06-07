@@ -158,6 +158,7 @@ instance CacheStore (InMemoryStore "token_bucket") Text IO where
     cache <- readIORef ref
     C.delete cache key
 
+-- | Instance for storing LeakyBucketState
 instance CacheStore (InMemoryStore "leaky_bucket") LeakyBucketState IO where
   readStore (InMemoryStore ref) _prefix key = do
     cache <- readIORef ref
@@ -215,11 +216,12 @@ count cache key = incStore cache key 3600  -- Default expiry of 1 hour
 reset :: (CacheStore store v IO) => Cache store -> Text -> IO ()
 reset cache key = deleteCache cache key
 
+-- | Clear all entries from an in-memory store
 clearInMemoryStore :: InMemoryStore a -> IO ()
 clearInMemoryStore (InMemoryStore ref) = do
   cache <- readIORef ref
   C.purge cache
 
+-- | Reset all entries in a cache
 cacheReset :: Cache (InMemoryStore a) -> IO ()
 cacheReset = clearInMemoryStore . cacheStore
-

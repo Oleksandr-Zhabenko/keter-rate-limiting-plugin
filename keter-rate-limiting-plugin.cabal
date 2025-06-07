@@ -21,7 +21,7 @@ common warnings
 
 library
     import:           warnings
-    exposed-modules:  Keter.RateLimiter, Keter.RateLimiter.Cache, Keter.RateLimiter.SlidingWindow, Keter.RateLimiter.TokenBucket, Keter.RateLimiter.LeakyBucket, Keter.RateLimiter.LeakyBucketState, Keter.RateLimiter.Notifications
+    exposed-modules:  Keter.RateLimiter, Keter.RateLimiter.Cache, Keter.RateLimiter.IPZones, Keter.RateLimiter.SlidingWindow, Keter.RateLimiter.TokenBucket, Keter.RateLimiter.LeakyBucket, Keter.RateLimiter.LeakyBucketState, Keter.RateLimiter.Notifications
     -- other-modules:
     -- other-extensions:
     build-depends:    
