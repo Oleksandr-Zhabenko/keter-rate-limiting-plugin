@@ -171,19 +171,6 @@ instance CacheStore (InMemoryStore "leaky_bucket") LeakyBucketState IO where
     cache <- readIORef ref
     C.delete cache key
 
--- | Instance for storing Text directly (was CompressedText)
-instance CacheStore (InMemoryStore "compressed_text") Text IO where
-  readStore (InMemoryStore ref) _prefix key = do
-    cache <- readIORef ref
-    C.lookup cache key
-  writeStore (InMemoryStore ref) _prefix key val expiresIn = do
-    cache <- readIORef ref
-    let expiration = Just (TimeSpec 0 (fromIntegral expiresIn * 1000000000))
-    C.insert' cache expiration key val
-  deleteStore (InMemoryStore ref) _prefix key = do
-    cache <- readIORef ref
-    C.delete cache key
-
 -- | Read from cache with prefixed key.
 readCache :: (CacheStore store v IO) => Cache store -> Text -> IO (Maybe v)
 readCache cache unprefixedKey =
