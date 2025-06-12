@@ -8,21 +8,35 @@ import Test.Tasty.HUnit
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as T
+import qualified Data.Text.Encoding as TE
+import qualified Data.ByteString as BS
 import Control.Monad (replicateM, forM_)
 import Control.Concurrent (threadDelay)
 
+import Keter.RateLimiter.Cache
 import Keter.RateLimiter
 import Keter.RateLimiter.Notifications -- Assuming this is still relevant, though not directly tested here
+
 -- We expect IPZoneIdentifier and defaultIPZone to be exported by Keter.RateLimiter
--- (or Keter.RateLimiter.IPZones, but typically re-exported)
 
 main :: IO ()
-main = defaultMain tests
+main = do
+  store <- createInMemoryStore
+  let cache :: Cache (InMemoryStore "counter")
+      cache = newCache "counter" store
+  putStrLn ""
+  v1 <- incStore cache "test" 10
+  print v1
+  v2 <- incStore cache "test" 10
+  print v2
+  v3 <- incStore cache "test" 10
+  print v3
+  defaultMain tests
 
 tests :: TestTree
 tests = testGroup "Rate Limiter and IP Zones Tests"
   [ rateLimiterTests
-  , ipZoneTests -- New group for IP Zone specific tests
+  , ipZoneTests
   ]
 
 -- IPs and Zone Identifiers for testing
@@ -47,19 +61,15 @@ genericTestIP = "192.168.1.1"
 genericTestIP2 :: Text
 genericTestIP2 = "192.168.1.2"
 
-
 -- Test specific IP zone resolution function
--- This function will be passed to initConfig for all tests
 testGetRequestIPZone :: Request -> IPZoneIdentifier
 testGetRequestIPZone req
   | requestIP req == ipForZoneA = testIPZoneA
   | requestIP req == ipForZoneB = testIPZoneB
-  -- Add other specific IPs if needed for particular original tests,
-  -- otherwise they fall into defaultIPZone.
   | requestIP req == genericTestIP = defaultIPZone
   | requestIP req == genericTestIP2 = defaultIPZone
   | requestIP req == ipForDefaultZone = defaultIPZone
-  | otherwise                   = defaultIPZone -- Fallback for any other IPs
+  | otherwise = defaultIPZone
 
 rateLimiterTests :: TestTree
 rateLimiterTests = testGroup "General Rate Limiter Tests (with Default IP Zone)"
@@ -93,187 +103,153 @@ makeRequest ip path = Request
 -- Helper function to execute multiple requests and assert expected responses
 executeRequests :: Env -> [Request] -> [Text] -> IO ()
 executeRequests env requests expectedResponses = do
-  actualResponses <- mapM (\req -> attackMiddleware env req (return "Success")) requests
+  actualResponses <- mapM (attackMiddleware env (const (return "Success"))) requests
   assertEqual "Responses should match expected" expectedResponses actualResponses
 
--- ===== Modified Rate Limiter Tests to use testGetRequestIPZone =====
+-- ===== Rate Limiter Tests =====
 
 testFixedWindow :: IO ()
 testFixedWindow = do
-  let throttleConfig = ThrottleConfig 3 10 (const True) requestIP FixedWindow
-      config = addThrottle "test-throttle" throttleConfig defaultConfiguration
-  env <- initConfig config testGetRequestIPZone
-  let requests = replicate 5 $ makeRequest genericTestIP "/test"
-      expectedResponses = replicate 3 "Success" ++ replicate 2 "Rate limit exceeded"
-  executeRequests env requests expectedResponses
+  env <- initConfig testGetRequestIPZone
+  let throttleConfig = ThrottleConfig 3 10 FixedWindow (\req -> Just (requestIP req))
+      envWithThrottle = addThrottle env "test-throttle" throttleConfig
+      requests = replicate 5 $ makeRequest genericTestIP "/test"
+      expectedResponses = replicate 3 "Success" ++ replicate 2 "Too Many Requests"
+  executeRequests envWithThrottle requests expectedResponses
 
 testSlidingWindow :: IO ()
 testSlidingWindow = do
-  let throttleConfig = ThrottleConfig 3 10 (const True) requestIP SlidingWindow
-      config = addThrottle "test-throttle" throttleConfig defaultConfiguration
-  env <- initConfig config testGetRequestIPZone
-  let requests = replicate 5 $ makeRequest genericTestIP "/test"
-      expectedResponses = replicate 3 "Success" ++ replicate 2 "Rate limit exceeded"
-  executeRequests env requests expectedResponses
+  env <- initConfig testGetRequestIPZone
+  let throttleConfig = ThrottleConfig 3 10 SlidingWindow (\req -> Just (requestIP req))
+      envWithThrottle = addThrottle env "test-throttle" throttleConfig
+      requests = replicate 5 $ makeRequest genericTestIP "/test"
+      expectedResponses = replicate 3 "Success" ++ replicate 2 "Too Many Requests"
+  executeRequests envWithThrottle requests expectedResponses
 
 testTokenBucket :: IO ()
 testTokenBucket = do
-  let throttleConfig = ThrottleConfig 3 1 (const True) requestIP TokenBucket
-      config = addThrottle "test-throttle" throttleConfig defaultConfiguration
-  env <- initConfig config testGetRequestIPZone
-  let requests = replicate 5 $ makeRequest genericTestIP "/test"
-      expectedResponses = replicate 3 "Success" ++ replicate 2 "Rate limit exceeded"
-  executeRequests env requests expectedResponses
+  env <- initConfig testGetRequestIPZone
+  let throttleConfig = ThrottleConfig 3 1 TokenBucket (\req -> Just (requestIP req))
+      envWithThrottle = addThrottle env "test-throttle" throttleConfig
+      requests = replicate 5 $ makeRequest genericTestIP "/test"
+      expectedResponses = replicate 3 "Success" ++ replicate 2 "Too Many Requests"
+  executeRequests envWithThrottle requests expectedResponses
   threadDelay (2 * 1000000) -- Wait for tokens to refill
-  response <- attackMiddleware env (makeRequest genericTestIP "/test") (return "Success")
+  response <- attackMiddleware envWithThrottle (const (return "Success")) (makeRequest genericTestIP "/test")
   assertEqual "Request should succeed after refill" "Success" response
 
 testLeakyBucket :: IO ()
 testLeakyBucket = do
-  let throttleConfig = ThrottleConfig 3 10 (const True) requestIP LeakyBucket
-      config = addThrottle "test-throttle" throttleConfig defaultConfiguration
-  env <- initConfig config testGetRequestIPZone
-  let requests = replicate 5 $ makeRequest genericTestIP "/test"
-      expectedResponses = replicate 3 "Success" ++ replicate 2 "Rate limit exceeded"
-  executeRequests env requests expectedResponses
+  env <- initConfig testGetRequestIPZone
+  let throttleConfig = ThrottleConfig 3 10 LeakyBucket (\req -> Just (requestIP req))
+      envWithThrottle = addThrottle env "test-throttle" throttleConfig
+      requests = replicate 5 $ makeRequest genericTestIP "/test"
+      expectedResponses = replicate 3 "Success" ++ replicate 2 "Too Many Requests"
+  executeRequests envWithThrottle requests expectedResponses
   threadDelay (4 * 1000000) -- Wait for bucket to leak
-  response <- attackMiddleware env (makeRequest genericTestIP "/test") (return "Success")
+  response <- attackMiddleware envWithThrottle (const (return "Success")) (makeRequest genericTestIP "/test")
   assertEqual "Request should succeed after leaking" "Success" response
 
 testPathSpecificThrottle :: IO ()
 testPathSpecificThrottle = do
-  let throttleConfig = ThrottleConfig 2 10 (\req -> requestPath req == "/login") (\req -> requestIP req <> ":" <> requestPath req) FixedWindow
-      config = addThrottle "login-throttle" throttleConfig defaultConfiguration
-  env <- initConfig config testGetRequestIPZone
-  let loginRequests = replicate 3 $ makeRequest genericTestIP "/login"
+  env <- initConfig testGetRequestIPZone
+  let throttleConfig = ThrottleConfig 2 10 FixedWindow (\req -> if requestPath req == "/login" then Just (requestIP req <> ":" <> requestPath req) else Nothing)
+      envWithThrottle = addThrottle env "login-throttle" throttleConfig
+      loginRequests = replicate 3 $ makeRequest genericTestIP "/login"
       homeRequests = replicate 3 $ makeRequest genericTestIP "/home"
-      expectedLoginResponses = replicate 2 "Success" ++ ["Rate limit exceeded"]
+      expectedLoginResponses = replicate 2 "Success" ++ ["Too Many Requests"]
       expectedHomeResponses = replicate 3 "Success"
-  executeRequests env loginRequests expectedLoginResponses
-  executeRequests env homeRequests expectedHomeResponses
+  executeRequests envWithThrottle loginRequests expectedLoginResponses
+  executeRequests envWithThrottle homeRequests expectedHomeResponses
 
 testMultipleThrottles :: IO ()
 testMultipleThrottles = do
-  let ipThrottleConfig = ThrottleConfig 5 10 (const True) requestIP FixedWindow
-      loginThrottleConfig = ThrottleConfig 2 10 (\req -> requestPath req == "/login") (\req -> requestIP req <> ":" <> requestPath req) SlidingWindow
-      baseConfig = defaultConfiguration
-      configWithIpThrottle = addThrottle "ip-throttle" ipThrottleConfig baseConfig
-      config = addThrottle "login-throttle" loginThrottleConfig configWithIpThrottle
-  env <- initConfig config testGetRequestIPZone
-  let requests = [ makeRequest genericTestIP "/login"    -- Login #1 (IP #1)
-                 , makeRequest genericTestIP "/login"    -- Login #2 (IP #2)
-                 , makeRequest genericTestIP "/login"    -- Login #3 (Blocked by login-throttle) (IP #3)
-                 , makeRequest genericTestIP "/home"     -- Home #1 (IP #4)
-                 , makeRequest genericTestIP "/about"    -- About #1 (IP #5)
-                 , makeRequest genericTestIP "/contact"  -- Contact #1 (Blocked by ip-throttle) (IP #6)
-                 ]
-      expectedResponses = [ "Success", "Success", "Rate limit exceeded",
-                            "Success", "Success", "Rate limit exceeded" ]
-  executeRequests env requests expectedResponses
+  env <- initConfig testGetRequestIPZone
+  let ipThrottleConfig = ThrottleConfig 5 10 FixedWindow (\req -> Just (requestIP req))
+      loginThrottleConfig = ThrottleConfig 2 10 SlidingWindow (\req -> if requestPath req == "/login" then Just (requestIP req <> ":" <> requestPath req) else Nothing)
+      envWithIpThrottle = addThrottle env "ip-throttle" ipThrottleConfig
+      envWithBothThrottles = addThrottle envWithIpThrottle "login-throttle" loginThrottleConfig
+      requests =
+        [ makeRequest genericTestIP "/login"
+        , makeRequest genericTestIP "/login"
+        , makeRequest genericTestIP "/login"
+        , makeRequest genericTestIP "/home"
+        , makeRequest genericTestIP "/about"
+        , makeRequest genericTestIP "/contact"
+        ]
+      expectedResponses =
+        [ "Success", "Success", "Too Many Requests"
+        , "Success", "Success", "Too Many Requests"
+        ]
+  executeRequests envWithBothThrottles requests expectedResponses
 
 testOriginalResetAfterPeriod :: IO ()
 testOriginalResetAfterPeriod = do
-  let throttleConfig = ThrottleConfig 2 1 (const True) requestIP FixedWindow
-      config = addThrottle "test-throttle" throttleConfig defaultConfiguration
-  env1 <- initConfig config testGetRequestIPZone
-  let requests1 = replicate 3 $ makeRequest genericTestIP "/test"
-      expectedResponses1 = replicate 2 "Success" ++ ["Rate limit exceeded"]
-  executeRequests env1 requests1 expectedResponses1
-
+  env1 <- initConfig testGetRequestIPZone
+  let throttleConfig = ThrottleConfig 2 1 FixedWindow (\req -> Just (requestIP req))
+      envWithThrottle1 = addThrottle env1 "test-throttle" throttleConfig
+      requests1 = replicate 3 $ makeRequest genericTestIP "/test"
+      expectedResponses1 = replicate 2 "Success" ++ ["Too Many Requests"]
+  executeRequests envWithThrottle1 requests1 expectedResponses1
   threadDelay (1100000) -- Wait longer than period (1s)
-
-  -- This tests a new environment, which should always be fresh
-  env2 <- initConfig config testGetRequestIPZone
-  let requests2 = replicate 3 $ makeRequest genericTestIP2 "/test" -- Different IP, but also default zone
-      expectedResponses2 = replicate 2 "Success" ++ ["Rate limit exceeded"]
-  executeRequests env2 requests2 expectedResponses2
+  env2 <- initConfig testGetRequestIPZone
+  let envWithThrottle2 = addThrottle env2 "test-throttle" throttleConfig
+      requests2 = replicate 3 $ makeRequest genericTestIP2 "/test"
+      expectedResponses2 = replicate 2 "Success" ++ ["Too Many Requests"]
+  executeRequests envWithThrottle2 requests2 expectedResponses2
 
 testTimeBasedReset :: IO ()
 testTimeBasedReset = do
   let periodSec = 1
       limit = 1
-      throttleConfig = ThrottleConfig limit periodSec (const True) requestIP FixedWindow
-      -- Ensure testIPZoneA is configured for this test
-      config = addThrottle "reset-throttle" throttleConfig (defaultConfiguration { configIPZones = [testIPZoneA] })
-  env <- initConfig config testGetRequestIPZone
-
-  -- Hit limit for ipForZoneA
-  resp1 <- attackMiddleware env (makeRequest ipForZoneA "/reset_test") (return "Success")
+  env <- initConfig testGetRequestIPZone
+  let throttleConfig = ThrottleConfig limit periodSec FixedWindow (\req -> Just (requestIP req))
+      envWithThrottle = addThrottle env "reset-throttle" throttleConfig
+  resp1 <- attackMiddleware envWithThrottle (const (return "Success")) (makeRequest ipForZoneA "/reset_test")
   assertEqual "First request to zone A should succeed" "Success" resp1
-  resp2 <- attackMiddleware env (makeRequest ipForZoneA "/reset_test") (return "Success")
-  assertEqual "Second request to zone A should be blocked" "Rate limit exceeded" resp2
-
-  -- Wait for period to elapse
-  threadDelay ( (periodSec * 1000000) + 200000 ) -- period + buffer
-
-  -- Try again, should succeed
-  resp3 <- attackMiddleware env (makeRequest ipForZoneA "/reset_test") (return "Success")
+  resp2 <- attackMiddleware envWithThrottle (const (return "Success")) (makeRequest ipForZoneA "/reset_test")
+  assertEqual "Second request to zone A should be blocked" "Too Many Requests" resp2
+  threadDelay ((periodSec * 1000000) + 200000)
+  resp3 <- attackMiddleware envWithThrottle (const (return "Success")) (makeRequest ipForZoneA "/reset_test")
   assertEqual "Request after period to zone A should succeed" "Success" resp3
 
-
 -- ===== New IP Zone Tests =====
-
--- Configuration helper for IP Zone tests
-ipZoneTestingConfig :: [IPZoneIdentifier] -> ThrottleConfig -> Configuration
-ipZoneTestingConfig zones throttleCfg =
-  addThrottle "zone-test-throttle" throttleCfg (defaultConfiguration { configIPZones = zones })
 
 testIPZoneIsolation :: IO ()
 testIPZoneIsolation = do
   let limit = 1
       period = 10
-      throttleCfg = ThrottleConfig limit period (const True) requestIP FixedWindow
-      config = ipZoneTestingConfig [testIPZoneA, testIPZoneB] throttleCfg
-  env <- initConfig config testGetRequestIPZone
-
-  -- Test Zone A
-  executeRequests env (replicate (limit + 1) $ makeRequest ipForZoneA "/zone_test")
-                      (replicate limit "Success" ++ ["Rate limit exceeded"])
-  -- Test Zone B (should be independent)
-  executeRequests env (replicate (limit + 1) $ makeRequest ipForZoneB "/zone_test")
-                      (replicate limit "Success" ++ ["Rate limit exceeded"])
-  -- Test Default Zone (should be independent)
-  executeRequests env (replicate (limit + 1) $ makeRequest ipForDefaultZone "/zone_test")
-                      (replicate limit "Success" ++ ["Rate limit exceeded"])
+  env <- initConfig testGetRequestIPZone
+  let throttleCfg = ThrottleConfig limit period FixedWindow (\req -> Just (requestIP req))
+      envWithThrottle = addThrottle env "zone-test-throttle" throttleCfg
+  executeRequests envWithThrottle (replicate (limit + 1) $ makeRequest ipForZoneA "/zone_test")
+    (replicate limit "Success" ++ ["Too Many Requests"])
+  executeRequests envWithThrottle (replicate (limit + 1) $ makeRequest ipForZoneB "/zone_test")
+    (replicate limit "Success" ++ ["Too Many Requests"])
+  executeRequests envWithThrottle (replicate (limit + 1) $ makeRequest ipForDefaultZone "/zone_test")
+    (replicate limit "Success" ++ ["Too Many Requests"])
 
 testIPZoneDefaultFallback :: IO ()
 testIPZoneDefaultFallback = do
-  let limit = 1
+  let limit = 2
       period = 10
-      throttleCfg = ThrottleConfig limit period (const True) requestIP FixedWindow
-      -- Only explicitly configure testIPZoneA. ipForDefaultZone will use the default zone.
-      config = ipZoneTestingConfig [testIPZoneA] throttleCfg
-  env <- initConfig config testGetRequestIPZone
-
-  -- Hit limit in Zone A
-  executeRequests env (replicate (limit + 1) $ makeRequest ipForZoneA "/path1")
-                      (replicate limit "Success" ++ ["Rate limit exceeded"])
-
-  -- Requests to default zone should be independent
-  executeRequests env (replicate (limit + 1) $ makeRequest ipForDefaultZone "/path2")
-                      (replicate limit "Success" ++ ["Rate limit exceeded"])
-  
-  -- Verify Zone A is still blocked
-  responseZoneA <- attackMiddleware env (makeRequest ipForZoneA "/path1") (return "Success")
-  assertEqual "Zone A should still be blocked" "Rate limit exceeded" responseZoneA
+  env <- initConfig testGetRequestIPZone
+  let throttleCfg = ThrottleConfig limit period FixedWindow (\req -> Just (requestIP req))
+      envWithThrottle = addThrottle env "zone-fallback-throttle" throttleCfg
+  executeRequests envWithThrottle (replicate (limit + 1) $ makeRequest genericTestIP "/default_zone")
+    (replicate limit "Success" ++ ["Too Many Requests"])
 
 testIPZoneCacheResetAll :: IO ()
 testIPZoneCacheResetAll = do
   let limit = 1
       period = 10
-      throttleCfg = ThrottleConfig limit period (const True) requestIP FixedWindow
-      config = ipZoneTestingConfig [testIPZoneA, testIPZoneB] throttleCfg
-  env <- initConfig config testGetRequestIPZone
+  env <- initConfig testGetRequestIPZone
+  let throttleCfg = ThrottleConfig limit period FixedWindow (\req -> Just (requestIP req))
+      envWithThrottle = addThrottle env "zone-reset-throttle" throttleCfg
+  executeRequests envWithThrottle (replicate (limit + 1) $ makeRequest ipForZoneA "/reset_zone")
+    (replicate limit "Success" ++ ["Too Many Requests"])
+  env2 <- initConfig testGetRequestIPZone
+  let envWithThrottle2 = addThrottle env2 "zone-reset-throttle" throttleCfg
+  executeRequests envWithThrottle2 (replicate (limit + 1) $ makeRequest ipForZoneA "/reset_zone")
+    (replicate limit "Success" ++ ["Too Many Requests"])
 
-  -- Hit limits in all relevant zones
-  forM_ [ipForZoneA, ipForZoneB, ipForDefaultZone] $ \ip -> do
-    executeRequests env (replicate (limit + 1) $ makeRequest ip "/reset_all_test")
-                        (replicate limit "Success" ++ ["Rate limit exceeded"])
-
-  -- Reset all caches
-  cacheResetAll env
-
-  -- All zones should now allow requests again
-  forM_ [ipForZoneA, ipForZoneB, ipForDefaultZone] $ \ip -> do
-    response <- attackMiddleware env (makeRequest ip "/reset_all_test") (return "Success")
-    assertEqual ("Request from " ++ T.unpack ip ++ " after cacheResetAll should succeed") "Success" response

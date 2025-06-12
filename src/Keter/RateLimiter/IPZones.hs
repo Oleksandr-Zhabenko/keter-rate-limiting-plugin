@@ -14,6 +14,7 @@ module Keter.RateLimiter.IPZones
   , ZoneSpecificCaches(..)
   , createZoneCaches
   , resetSingleZoneCaches
+  , newZoneSpecificCaches
   ) where
 
 import Data.Text (Text)
@@ -61,3 +62,7 @@ resetSingleZoneCaches zsc = do
   cacheReset (zscTimestampCache zsc)
   cacheReset (zscTokenBucketCache zsc)
   cacheReset (zscLeakyBucketCache zsc)
+
+-- | Alias for createZoneCaches.
+newZoneSpecificCaches :: IO ZoneSpecificCaches
+newZoneSpecificCaches = createZoneCaches

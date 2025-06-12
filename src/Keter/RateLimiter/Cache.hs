@@ -9,7 +9,7 @@ rack-attack, Copyright (c) 2016 by Kickstarter, PBC, under the MIT License.
 Oleksandr Zhabenko added several implementations of the window algorithm: sliding window, token bucket window, leaky bucket window alongside with the initial count algorithm using AI chatbots.
 
 This implementation is released under the MIT License.
- -}
+-}
 
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
@@ -26,13 +26,12 @@ module Keter.RateLimiter.Cache
   ( Cache(..)
   , CacheStore(..)
   , InMemoryStore
+  , ResettableStore -- ^ If somebody would like to extend the typeclass further, otherwise it is just inner typeclass in this module only
   , newInMemoryStore
   , readCache
   , writeCache
   , deleteCache
   , incStore
-  , count
-  , reset
   , newCache
   , createInMemoryStore
   , clearInMemoryStore
@@ -41,7 +40,6 @@ module Keter.RateLimiter.Cache
 
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.Aeson (FromJSON, ToJSON, decodeStrict, encode)
-import qualified Data.ByteString.Char8 as BS
 import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -54,20 +52,18 @@ import Data.Maybe (fromMaybe)
 import GHC.TypeLits (Symbol)
 import Data.Proxy (Proxy(..))
 import Keter.RateLimiter.LeakyBucketState
-
--- Import to support unsafePerformIO
 import System.IO.Unsafe (unsafePerformIO)
 
 -- | Cache wrapper around the store and a key prefix.
 data Cache store = Cache
   { cachePrefix :: Text
-  , cacheStore  :: store
+  , cacheStore :: store
   }
 
 -- | CacheStore class for abstracting storage backends.
 class MonadIO m => CacheStore store v m | store -> v where
-  readStore   :: store -> Text -> Text -> m (Maybe v)
-  writeStore  :: store -> Text -> Text -> v -> Int -> m ()
+  readStore :: store -> Text -> Text -> m (Maybe v)
+  writeStore :: store -> Text -> Text -> v -> Int -> m ()
   deleteStore :: store -> Text -> Text -> m ()
 
 -- | Create new cache with prefix and store
@@ -84,7 +80,6 @@ createInMemoryStore = do
   return $ InMemoryStore cacheRef
 
 -- | In-memory store using IORef-wrapped Data.Cache with type-level tag
--- to differentiate instances for different value types
 data InMemoryStore (a :: Symbol) = InMemoryStore (IORef (C.Cache Text Text))
 
 -- | Constructor for in-memory store with explicit type tag
@@ -101,7 +96,6 @@ instance CacheStore (InMemoryStore "timestamps") [Int] IO where
       Just txt -> case decodeStrict (encodeUtf8 txt) of
         Nothing -> return Nothing
         Just val -> return (Just val)
-
   writeStore (InMemoryStore ref) _prefix key val expiresIn = do
     cache <- readIORef ref
     let bs = encode val
@@ -112,7 +106,6 @@ instance CacheStore (InMemoryStore "timestamps") [Int] IO where
       Right vtxt -> do
         let expiration = Just (TimeSpec 0 (fromIntegral expiresIn * 1000000000))
         C.insert' cache expiration key vtxt
-
   deleteStore (InMemoryStore ref) _prefix key = do
     cache <- readIORef ref
     C.delete cache key
@@ -127,7 +120,6 @@ instance CacheStore (InMemoryStore "counter") Int IO where
       Just txt -> case decodeStrict (encodeUtf8 txt) of
         Nothing -> return Nothing
         Just val -> return (Just val)
-
   writeStore (InMemoryStore ref) _prefix key val expiresIn = do
     cache <- readIORef ref
     let bs = encode val
@@ -138,7 +130,6 @@ instance CacheStore (InMemoryStore "counter") Int IO where
       Right vtxt -> do
         let expiration = Just (TimeSpec 0 (fromIntegral expiresIn * 1000000000))
         C.insert' cache expiration key vtxt
-
   deleteStore (InMemoryStore ref) _prefix key = do
     cache <- readIORef ref
     C.delete cache key
@@ -148,12 +139,10 @@ instance CacheStore (InMemoryStore "token_bucket") Text IO where
   readStore (InMemoryStore ref) _prefix key = do
     cache <- readIORef ref
     C.lookup cache key
-
   writeStore (InMemoryStore ref) _prefix key val expiresIn = do
     cache <- readIORef ref
     let expiration = Just (TimeSpec 0 (fromIntegral expiresIn * 1000000000))
     C.insert' cache expiration key val
-
   deleteStore (InMemoryStore ref) _prefix key = do
     cache <- readIORef ref
     C.delete cache key
@@ -168,7 +157,6 @@ instance CacheStore (InMemoryStore "leaky_bucket") LeakyBucketState IO where
       Just txt -> case decodeStrict (encodeUtf8 txt) of
         Nothing -> return Nothing
         Just val -> return (Just val)
-
   writeStore (InMemoryStore ref) _prefix key val expiresIn = do
     cache <- readIORef ref
     let bs = encode val
@@ -179,7 +167,19 @@ instance CacheStore (InMemoryStore "leaky_bucket") LeakyBucketState IO where
       Right vtxt -> do
         let expiration = Just (TimeSpec 0 (fromIntegral expiresIn * 1000000000))
         C.insert' cache expiration key vtxt
+  deleteStore (InMemoryStore ref) _prefix key = do
+    cache <- readIORef ref
+    C.delete cache key
 
+-- | Instance for storing Text directly (was CompressedText)
+instance CacheStore (InMemoryStore "compressed_text") Text IO where
+  readStore (InMemoryStore ref) _prefix key = do
+    cache <- readIORef ref
+    C.lookup cache key
+  writeStore (InMemoryStore ref) _prefix key val expiresIn = do
+    cache <- readIORef ref
+    let expiration = Just (TimeSpec 0 (fromIntegral expiresIn * 1000000000))
+    C.insert' cache expiration key val
   deleteStore (InMemoryStore ref) _prefix key = do
     cache <- readIORef ref
     C.delete cache key
@@ -208,20 +208,18 @@ incStore cache unprefixedKey expiresIn = do
   writeStore (cacheStore cache) (cachePrefix cache) fullKey newVal expiresIn
   return newVal
 
--- | Count operation - alias for incStore with a specific timeout
-count :: (CacheStore store v IO, Num v) => Cache store -> Text -> IO v
-count cache key = incStore cache key 3600  -- Default expiry of 1 hour
+class ResettableStore store where
+  resetStore :: store -> IO ()
 
--- | Reset a cache key
-reset :: (CacheStore store v IO) => Cache store -> Text -> IO ()
-reset cache key = deleteCache cache key
+instance ResettableStore (InMemoryStore a) where
+  resetStore (InMemoryStore ref) = do
+    cache <- readIORef ref
+    C.purge cache
 
--- | Clear all entries from an in-memory store
 clearInMemoryStore :: InMemoryStore a -> IO ()
 clearInMemoryStore (InMemoryStore ref) = do
   cache <- readIORef ref
   C.purge cache
 
--- | Reset all entries in a cache
-cacheReset :: Cache (InMemoryStore a) -> IO ()
-cacheReset = clearInMemoryStore . cacheStore
+cacheReset :: ResettableStore store => Cache store -> IO ()
+cacheReset (Cache _ store) = resetStore store

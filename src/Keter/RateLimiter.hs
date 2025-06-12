@@ -31,153 +31,116 @@ module Keter.RateLimiter
   , cacheResetAll
   , IPZoneIdentifier
   , defaultIPZone
-  , ZoneSpecificCaches(..)
+  , ZoneSpecificCaches
   ) where
 
 import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
-import Data.Maybe (fromMaybe)
-import qualified Data.Text as T
 import Data.Text (Text)
-
-import Keter.RateLimiter.Cache
-  ( Cache(..)
-  , InMemoryStore
-  , incStore
-  )
-
--- Import IP Zone functionality
-import Keter.RateLimiter.IPZones
-  ( IPZoneIdentifier
-  , defaultIPZone
-  , ZoneSpecificCaches(..)
-  , createZoneCaches
-  , resetSingleZoneCaches
-  )
-
+import GHC.Generics (Generic)
+import qualified Keter.RateLimiter.Notifications as Notifications
+import Keter.RateLimiter.IPZones (IPZoneIdentifier, defaultIPZone, ZoneSpecificCaches(..), newZoneSpecificCaches, resetSingleZoneCaches)
+import Keter.RateLimiter.Cache (incStore)
 import qualified Keter.RateLimiter.SlidingWindow as SW
 import qualified Keter.RateLimiter.TokenBucket as TB
 import qualified Keter.RateLimiter.LeakyBucket as LB
-import qualified Keter.RateLimiter.Notifications as Notifications
+import Data.IORef (IORef, newIORef, readIORef, modifyIORef')
+import Control.Monad (when)
 
--- | Application environment with configuration and zone-specific caches
+-- Основні структури
+
 data Env = Env
-  { envConfig        :: Configuration
-  -- | A map from IP zone identifiers to their specific caches
-  , envZoneCachesMap :: Map IPZoneIdentifier ZoneSpecificCaches
-  -- | Function to determine the IP zone for a request
-  , envGetIPZone     :: Request -> IPZoneIdentifier
+  { envConfig :: Configuration
+  , envZoneCachesMap :: IORef (Map IPZoneIdentifier ZoneSpecificCaches)
   }
-
-type Response = Text
-type App = IO
-
-data Request = Request
-  { requestMethod  :: Text
-  , requestPath    :: Text
-  , requestHost    :: Text
-  , requestIP      :: Text
-  , requestHeaders :: Map Text Text
-  } deriving (Show, Eq)
-
-data Algorithm = FixedWindow | SlidingWindow | TokenBucket | LeakyBucket deriving (Show, Eq)
 
 data Configuration = Configuration
   { configThrottles :: Map Text ThrottleConfig
-  , configNotifier  :: Notifications.Notifier
-  -- | List of IP Zone Identifiers to initialize caches for.
-  -- The 'defaultIPZone' is always created.
-  , configIPZones   :: [IPZoneIdentifier]
+  , configNotifier :: Notifications.Notifier
+  , configGetRequestIPZone :: Request -> IPZoneIdentifier
   }
 
 data ThrottleConfig = ThrottleConfig
-  { throttleLimit     :: Int
-  , throttlePeriod    :: Int
-  , throttleCondition :: Request -> Bool
-  , throttleKeyFn     :: Request -> Text
+  { throttleLimit :: Int
+  , throttlePeriod :: Int
   , throttleAlgorithm :: Algorithm
+  , throttleIdentifier :: Request -> Maybe Text
   }
+
+data Algorithm = FixedWindow | SlidingWindow | TokenBucket | LeakyBucket
+  deriving (Show, Eq, Generic)
+
+data Request = Request
+  { requestMethod :: Text
+  , requestPath :: Text
+  , requestHost :: Text
+  , requestIP :: Text
+  , requestHeaders :: Map Text Text
+  } deriving (Show)
+
+type Response = Text
+type App = Request -> IO Response
+
+-- 1. Ініціалізація Env з IORef
+initConfig :: (Request -> IPZoneIdentifier) -> IO Env
+initConfig getIPZone = do
+  let config = defaultConfiguration { configGetRequestIPZone = getIPZone }
+  cachesRef <- newIORef Map.empty
+  return Env { envConfig = config, envZoneCachesMap = cachesRef }
 
 defaultConfiguration :: Configuration
 defaultConfiguration = Configuration
   { configThrottles = Map.empty
-  , configNotifier = Notifications.noopNotifier
-  , configIPZones = [] -- No extra zones by default
+  , configNotifier = Notifications.consoleNotifier
+  , configGetRequestIPZone = const defaultIPZone
   }
 
--- | Initialize configuration with IP zone support
--- User-defined function to get the IP zone for a request.
--- This needs to be implemented by the user of the library and passed to 'initConfig'.
--- Example structure:
---
--- > myGetRequestIPZone :: Request -> IPZoneIdentifier
--- > myGetRequestIPZone req =
--- >   if requestIP req `elem` ["127.0.0.1", "::1"]
--- >   then "localhost_zone"
--- >   else if T.isPrefixOf "192.168." (requestIP req)
--- >   then "internal_zone"
--- >   else defaultIPZone
-initConfig :: Configuration
-           -> (Request -> IPZoneIdentifier) -- ^ Function to determine IP zone
-           -> IO Env
-initConfig config getIPZoneFn = do
-  -- Create caches for the default zone
-  defaultCaches <- createZoneCaches
-  let initialMap = Map.singleton defaultIPZone defaultCaches
+addThrottle :: Env -> Text -> ThrottleConfig -> Env
+addThrottle env name cfg =
+  let newThrottles = Map.insert name cfg (configThrottles $ envConfig env)
+  in env { envConfig = (envConfig env) { configThrottles = newThrottles } }
 
-  -- Create caches for other specified zones
-  additionalZoneCachesList <- mapM (\zoneId -> (,) zoneId <$> createZoneCaches) (configIPZones config)
-  let allZoneCachesMap = Map.union (Map.fromList additionalZoneCachesList) initialMap
-
-  return $ Env
-    { envConfig = config
-    , envZoneCachesMap = allZoneCachesMap
-    , envGetIPZone = getIPZoneFn
-    }
-
-addThrottle :: Text -> ThrottleConfig -> Configuration -> Configuration
-addThrottle name cfg conf =
-  conf { configThrottles = Map.insert name cfg (configThrottles conf) }
-
--- | Helper to get the caches for a given request
-getCachesForRequest :: Env -> Request -> ZoneSpecificCaches
-getCachesForRequest env req =
-  let zoneId = envGetIPZone env req
-      zoneMap = envZoneCachesMap env
-  -- Prefer the specific zone's caches, fall back to default if the zoneId isn't in the map
-  in fromMaybe (zoneMap Map.! defaultIPZone) (Map.lookup zoneId zoneMap)
-
-attackMiddleware :: Env -> Request -> App Response -> App Response
-attackMiddleware env req app = do
-  let zoneCaches = getCachesForRequest env req -- Get caches specific to the request's IP zone
-  blocked <- checkThrottles (envConfig env) zoneCaches req
+attackMiddleware :: Env -> App -> App
+attackMiddleware env app req = do
+  blocked <- instrument env req
   if blocked
-    then return "Rate limit exceeded"
-    else instrument env req app
+    then return "Too Many Requests"
+    else app req
 
-instrument :: Env -> Request -> App Response -> App Response
-instrument _env _req app = app  -- Placeholder for actual instrumentation logic
+instrument :: Env -> Request -> IO Bool
+instrument initialEnv req = do
+  let throttles = Map.toList (configThrottles $ envConfig initialEnv)
+  let go :: Bool -> Env -> [(Text, ThrottleConfig)] -> IO (Bool, Env)
+      go currentBlocked currentEnv [] = return (currentBlocked, currentEnv)
+      go currentBlocked currentEnv ((name, throttleCfg):remainingThrottles) = do
+        if currentBlocked
+          then return (True, currentEnv)
+          else do
+            (blocked, updatedEnv) <- check currentEnv name throttleCfg req
+            go blocked updatedEnv remainingThrottles
+  (isBlocked, _) <- go False initialEnv throttles
+  return isBlocked
 
-checkThrottles :: Configuration -> ZoneSpecificCaches -> Request -> App Bool
-checkThrottles config zoneCaches req = do
-  let throttles = configThrottles config
-  results <- mapM (checkThrottle config zoneCaches req) (Map.toList throttles)
-  return $ or results
-
-checkThrottle :: Configuration -> ZoneSpecificCaches -> Request -> (Text, ThrottleConfig) -> App Bool
-checkThrottle config zoneCaches req (name, throttleCfg) =
-  if not (throttleCondition throttleCfg req)
-    then return False
-    else do
-      let key = throttleKeyFn throttleCfg req
-          fullKey = name <> ":" <> key
+-- 2. check з IORef для кешів
+check :: Env -> Text -> ThrottleConfig -> Request -> IO (Bool, Env)
+check env name throttleCfg req =
+  case throttleIdentifier throttleCfg req of
+    Nothing -> return (False, env)
+    Just key -> do
+      let config = envConfig env
+          ipZone = configGetRequestIPZone config req
+      cachesMap <- readIORef (envZoneCachesMap env)
+      zoneCaches <- case Map.lookup ipZone cachesMap of
+        Just caches -> return caches
+        Nothing -> do
+          newCaches <- newZoneSpecificCaches
+          modifyIORef' (envZoneCachesMap env) (Map.insert ipZone newCaches)
+          return newCaches
+      let fullKey = name <> ":" <> key
       isBlocked <- case throttleAlgorithm throttleCfg of
         FixedWindow -> do
-          -- Use incStore directly with the throttle's period
-          -- This ensures the cache entry for the counter respects the rule's specific period for expiration.
           currentCount <- incStore (zscCounterCache zoneCaches) fullKey (throttlePeriod throttleCfg)
           return (currentCount > fromIntegral (throttleLimit throttleCfg))
-
         SlidingWindow -> do
           allowed <- SW.allowRequest
             (zscTimestampCache zoneCaches)
@@ -185,7 +148,6 @@ checkThrottle config zoneCaches req (name, throttleCfg) =
             (throttleLimit throttleCfg)
             (throttlePeriod throttleCfg)
           return (not allowed)
-
         TokenBucket -> do
           let refillRate = fromIntegral (throttleLimit throttleCfg) / fromIntegral (throttlePeriod throttleCfg)
           allowed <- TB.allowRequest
@@ -194,30 +156,25 @@ checkThrottle config zoneCaches req (name, throttleCfg) =
             (throttleLimit throttleCfg)
             refillRate
           return (not allowed)
-
         LeakyBucket -> do
           let leakRate = fromIntegral (throttleLimit throttleCfg) / fromIntegral (throttlePeriod throttleCfg)
+              ttl = throttlePeriod throttleCfg
           allowed <- LB.allowRequest
             (zscLeakyBucketCache zoneCaches)
             fullKey
             (throttleLimit throttleCfg)
             leakRate
+            ttl
           return (not allowed)
-
       when isBlocked $
         Notifications.notify
           (configNotifier config)
           name
           req
           (throttleLimit throttleCfg)
-
-      return isBlocked
+      return (isBlocked, env)
 
 cacheResetAll :: Env -> IO ()
 cacheResetAll env = do
-  -- Reset caches for all configured zones by iterating through the map values
-  mapM_ resetSingleZoneCaches (Map.elems $ envZoneCachesMap env)
-
--- | Helper
-when :: Monad m => Bool -> m () -> m ()
-when p action = if p then action else return ()
+  cachesMap <- readIORef (envZoneCachesMap env)
+  mapM_ resetSingleZoneCaches (Map.elems cachesMap)

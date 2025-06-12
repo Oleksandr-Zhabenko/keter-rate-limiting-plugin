@@ -21,8 +21,9 @@ allowRequest
   -> Text   -- ^ Key
   -> Int    -- ^ Capacity
   -> Double -- ^ Leak rate (units per second)
+  -> Int    -- ^ TTL (seconds) 
   -> IO Bool
-allowRequest cache unprefixedKey capacity leakRate = do
+allowRequest cache unprefixedKey capacity leakRate ttl = do
   now <- floor <$> getPOSIXTime
   let key = cachePrefix cache <> ":" <> unprefixedKey
   mstate <- readStore (cacheStore cache) (cachePrefix cache) key
@@ -34,9 +35,12 @@ allowRequest cache unprefixedKey capacity leakRate = do
   if level state < fromIntegral capacity
     then do
       let newState = state { level = level state + 1 }
-      writeStore (cacheStore cache) (cachePrefix cache) key newState 3600
+      writeStore (cacheStore cache) (cachePrefix cache) key newState ttl
       return True
-    else return False
+    else do
+      -- Оновлюємо стан навіть якщо не дозволено
+      writeStore (cacheStore cache) (cachePrefix cache) key state ttl
+      return False
   where
     leak (LeakyBucketState oldLevel lastTime) nowTime =
       let delta = fromIntegral (nowTime - lastTime) :: Double
