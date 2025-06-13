@@ -1,11 +1,13 @@
 cabal-version:      3.0
 name:               keter-rate-limiting-plugin
 version:            0.1.0.0
-synopsis:           Keter rate limiting plugin.
--- description:
-homepage:
-    https://github.com/Oleksandr-Zhabenko/keter-rate-limiting-plugin
-
+synopsis:           Simple Keter rate limiting plugin.
+description:
+    A modern, high-performance, and highly customisable rate limiting plugin for keter.
+    Provides four window algorithms (Fixed Window, Sliding Window, Token Bucket, Leaky Bucket),
+    IP zone support, and convenient and customisable API.
+    See README.md and homepage for usage and details.
+homepage:           https://github.com/Oleksandr-Zhabenko/keter-rate-limiting-plugin
 license:            MIT
 license-file:       LICENSE
 author:             Oleksandr Zhabenko
@@ -21,19 +23,29 @@ common warnings
 
 library
     import:           warnings
-    exposed-modules:  Keter.RateLimiter, Keter.RateLimiter.Cache, Keter.RateLimiter.IPZones, Keter.RateLimiter.SlidingWindow, Keter.RateLimiter.TokenBucket, Keter.RateLimiter.LeakyBucket, Keter.RateLimiter.LeakyBucketState, Keter.RateLimiter.Notifications
-    -- other-modules:
-    -- other-extensions:
-    build-depends:    
-          base                    >=4        && <5
-          , aeson                 >=2.0.0 && <2.2 || >=2.2.0.0 && <2.3
-          , bytestring            >=0.10.12 && <0.12 || >=0.12.0.0 && <0.13
-          , text                  >=1.2.5    && <3.0
-          , time                  >=1.9.3    && <2.0
-          , hashable              >=1.4.2.0  && <2
-          , cache                 >=0.1.3.0  && <1
-          , clock                 >=0.8.3    && <1
-          , containers            ^>=0.6.4   || ^>=0.7     
+    exposed-modules:
+        Keter.RateLimiter
+        Keter.RateLimiter.Cache
+        Keter.RateLimiter.IPZones
+        Keter.RateLimiter.SlidingWindow
+        Keter.RateLimiter.TokenBucket
+        Keter.RateLimiter.LeakyBucket
+        Keter.RateLimiter.LeakyBucketState
+        Keter.RateLimiter.Notifications
+    -- other-modules: (add if you have internal modules)
+    default-extensions: DataKinds, DeriveGeneric, FlexibleContexts, FlexibleInstances, ForeignFunctionInterface, FunctionalDependencies, InstanceSigs, KindSignatures, MultiParamTypeClasses, OverloadedStrings, ScopedTypeVariables, TypeApplications 
+    build-depends:
+        base >= 4.7 && < 5,
+        text >= 1.2,
+        bytestring >= 0.10,
+        aeson >= 1.4,
+        base64-bytestring >= 1.0,
+        cache >= 0.1,
+        containers >= 0.6,
+        time >= 1.9,
+        hashable >= 1.4.2.0 && < 2,
+        clock >= 0.8.3 && < 1
+    extra-libraries: snappy
     hs-source-dirs:   src
     default-language: Haskell2010
 
@@ -44,10 +56,10 @@ test-suite keter-rate-limiting-plugin-test
     hs-source-dirs:   test
     main-is:          Main.hs
     build-depends:
-        base >=4 && <5
-        , keter-rate-limiting-plugin
-        , tasty                  >=1.4     && <1.5
-        , tasty-hunit            >=0.10    && <0.11
-        , containers             ^>=0.6.4  || ^>=0.7
-        , bytestring             >=0.10.12 && <0.12 || >=0.12.0.0 && <0.13
-        , text                   >=1.2.5   && <3.0
+        base >=4 && <5,
+        bytestring >= 0.10,
+        keter-rate-limiting-plugin,
+        tasty >= 1.4 && < 1.5,
+        tasty-hunit >= 0.10 && < 0.11,
+        containers ^>= 0.6.4 || ^>= 0.7,
+        text >= 1.2.5 && < 3.0

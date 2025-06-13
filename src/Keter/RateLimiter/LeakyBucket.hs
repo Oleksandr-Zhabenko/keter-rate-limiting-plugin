@@ -1,27 +1,67 @@
-{-
-Oleksandr Zhabenko added several implementations of the window algorithm: here in the file there is a leaky bucket window implementation using AI chatbots.
--}
-
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE DataKinds #-}
+
+{-|
+Module      : Keter.RateLimiter.LeakyBucket
+Description : Leaky bucket rate limiting algorithm implementation
+Copyright   : (c) 2025 Oleksandr Zhabenko
+License     : MIT
+Maintainer  : oleksandr.zhabenko@yahoo.com
+Stability   : stable
+Portability : portable
+
+This module implements the leaky bucket rate limiting algorithm using a cache-backed state.
+
+== Overview
+
+The leaky bucket algorithm controls the rate of requests by simulating a bucket that leaks at a constant rate.
+Requests add to the bucket's level, and if the level exceeds the capacity, further requests are denied until the bucket leaks enough.
+
+This implementation stores the bucket state in a cache, allowing distributed or persistent rate limiting.
+
+== Key function
+
+- 'allowRequest' attempts to allow a request identified by a key.
+  It updates the bucket state accordingly and returns 'True' if the request is allowed, or 'False' otherwise.
+
+== Parameters of 'allowRequest'
+
+* Cache — the cache storing the leaky bucket states.
+* Key — identifier for the bucket (e.g., user or IP).
+* Capacity — maximum bucket level (number of requests allowed before blocking).
+* Leak rate — the rate at which the bucket leaks (units per second).
+* TTL — time-to-live for the cache entry in seconds.
+
+== Behaviour
+
+When a request arrives, the bucket leaks according to the elapsed time since the last update.
+If the bucket level after leaking is below capacity, the request is allowed and the level increments.
+Otherwise, the request is denied, but the state is still updated in the cache.
+
+-}
 
 module Keter.RateLimiter.LeakyBucket
   ( allowRequest
   ) where
 
-import Keter.RateLimiter.Cache (Cache(..), CacheStore(..), InMemoryStore)
+import Keter.RateLimiter.Cache
 import Keter.RateLimiter.LeakyBucketState (LeakyBucketState(..))
 import Data.Time.Clock.POSIX (getPOSIXTime)
 import Data.Text (Text)
 
--- | Leaky Bucket rate limiter
+-- | Attempt to allow a request under the leaky bucket rate limiting algorithm.
+--
+-- Returns 'True' if the request is allowed, 'False' if it exceeds the capacity.
+--
+-- The bucket leaks at a constant rate specified by 'leakRate' (units per second).
+-- The bucket state is stored in the provided cache with a time-to-live (TTL).
 allowRequest
   :: Cache (InMemoryStore "leaky_bucket")
-  -> Text   -- ^ Key
-  -> Int    -- ^ Capacity
+  -> Text   -- ^ Key identifying the bucket (e.g., user ID, IP address)
+  -> Int    -- ^ Capacity of the bucket (maximum allowed level)
   -> Double -- ^ Leak rate (units per second)
-  -> Int    -- ^ TTL (seconds) 
+  -> Int    -- ^ TTL for the cache entry (seconds)
   -> IO Bool
 allowRequest cache unprefixedKey capacity leakRate ttl = do
   now <- floor <$> getPOSIXTime
@@ -38,10 +78,13 @@ allowRequest cache unprefixedKey capacity leakRate ttl = do
       writeStore (cacheStore cache) (cachePrefix cache) key newState ttl
       return True
     else do
-      -- Оновлюємо стан навіть якщо не дозволено
+      -- Update state even if request is denied to reflect leaking
       writeStore (cacheStore cache) (cachePrefix cache) key state ttl
       return False
+
   where
+    -- | Calculate the new bucket state after leaking since the last update.
+    leak :: LeakyBucketState -> Int -> LeakyBucketState
     leak (LeakyBucketState oldLevel lastTime) nowTime =
       let delta = fromIntegral (nowTime - lastTime) :: Double
           leaked = delta * leakRate

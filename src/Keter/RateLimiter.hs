@@ -1,6 +1,16 @@
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DataKinds #-}
+
 {-|
-Copyright (c) 2025 Oleksandr Zhabenko
-  
+Module      : Keter.RateLimiter
+Description : Comprehensive rate limiting middleware with IP zone support and convenient/customisable key management
+Copyright   : (c) 2025 Oleksandr Zhabenko
+License     : MIT
+Maintainer  : oleksandr.zhabenko@yahoo.com
+Stability   : stable
+Portability : portable
+
 This file is a ported to Haskell language code with some simlifications of rack-attack 
 https://github.com/rack/rack-attack/blob/main/lib/rack/attack.rb
 and is based on the structure of the original code of 
@@ -9,11 +19,31 @@ Oleksandr Zhabenko added several implementations of the window algorithm: slidin
 IP Zone functionality added to allow separate caches per IP zone.
 
 This implementation is released under the MIT License.
- -}
 
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE DataKinds #-}
+This module provides a rack-attack inspired rate limiting middleware with IP zone support.
+It allows convenient configuration with automatic key composition, but also supports full customisation
+for advanced users who wish to control key structure or throttling logic.
+
+== Features
+
+* Middleware integration via 'attackMiddleware'
+* Support for multiple algorithms selectable per throttle
+* Dynamic throttle configuration with 'addThrottle'
+* Per-IP-zone cache management
+* Notifications on rate limit events
+* Cache reset utilities
+* Convenient key management wrappers (recommended for most use cases)
+* Full customisability for advanced scenarios
+
+== Usage
+
+1. Initialise environment with 'initConfig', providing a function to extract IP zones from requests.
+2. Add throttles with 'addThrottle'.
+3. Use 'attackMiddleware' to enforce rate limiting.
+4. Use 'cacheResetAll' to clear caches if needed.
+5. For most use cases, use the convenient key wrappers; for advanced control, use the base functions and compose keys as you wish.
+
+-}
 
 module Keter.RateLimiter
   ( Env(..)
@@ -32,6 +62,12 @@ module Keter.RateLimiter
   , IPZoneIdentifier
   , defaultIPZone
   , ZoneSpecificCaches
+  -- Wrappers for convenience (re-exported from Cache)
+  , makeCacheKey
+  , incStoreWithZone
+  , readCacheWithZone
+  , writeCacheWithZone
+  , deleteCacheWithZone
   ) where
 
 import qualified Data.Map.Strict as Map
@@ -40,15 +76,14 @@ import Data.Text (Text)
 import GHC.Generics (Generic)
 import qualified Keter.RateLimiter.Notifications as Notifications
 import Keter.RateLimiter.IPZones (IPZoneIdentifier, defaultIPZone, ZoneSpecificCaches(..), newZoneSpecificCaches, resetSingleZoneCaches)
-import Keter.RateLimiter.Cache (incStore)
+import Keter.RateLimiter.Cache
 import qualified Keter.RateLimiter.SlidingWindow as SW
 import qualified Keter.RateLimiter.TokenBucket as TB
 import qualified Keter.RateLimiter.LeakyBucket as LB
 import Data.IORef (IORef, newIORef, readIORef, modifyIORef')
 import Control.Monad (when)
 
--- Основні структури
-
+-- | Environment holding configuration and caches per IP zone.
 data Env = Env
   { envConfig :: Configuration
   , envZoneCachesMap :: IORef (Map IPZoneIdentifier ZoneSpecificCaches)
@@ -116,17 +151,18 @@ instrument initialEnv req = do
         if currentBlocked
           then return (True, currentEnv)
           else do
-            (blocked, updatedEnv) <- check currentEnv name throttleCfg req
+            (blocked, updatedEnv) <- checkWithZone currentEnv name throttleCfg req
             go blocked updatedEnv remainingThrottles
   (isBlocked, _) <- go False initialEnv throttles
   return isBlocked
 
--- 2. check з IORef для кешів
-check :: Env -> Text -> ThrottleConfig -> Request -> IO (Bool, Env)
-check env name throttleCfg req =
+-- | Check a single throttle against a request, updating caches and notifying if blocked.
+--   Uses convenient key composition by default, but can be replaced for advanced scenarios.
+checkWithZone :: Env -> Text -> ThrottleConfig -> Request -> IO (Bool, Env)
+checkWithZone env throttleName throttleCfg req =
   case throttleIdentifier throttleCfg req of
     Nothing -> return (False, env)
-    Just key -> do
+    Just userKey -> do
       let config = envConfig env
           ipZone = configGetRequestIPZone config req
       cachesMap <- readIORef (envZoneCachesMap env)
@@ -136,11 +172,11 @@ check env name throttleCfg req =
           newCaches <- newZoneSpecificCaches
           modifyIORef' (envZoneCachesMap env) (Map.insert ipZone newCaches)
           return newCaches
-      let fullKey = name <> ":" <> key
+      let fullKey = makeCacheKey throttleName ipZone userKey
       isBlocked <- case throttleAlgorithm throttleCfg of
         FixedWindow -> do
           currentCount <- incStore (zscCounterCache zoneCaches) fullKey (throttlePeriod throttleCfg)
-          return (currentCount > fromIntegral (throttleLimit throttleCfg))
+          return (currentCount > throttleLimit throttleCfg)
         SlidingWindow -> do
           allowed <- SW.allowRequest
             (zscTimestampCache zoneCaches)
@@ -169,7 +205,7 @@ check env name throttleCfg req =
       when isBlocked $
         Notifications.notify
           (configNotifier config)
-          name
+          throttleName
           req
           (throttleLimit throttleCfg)
       return (isBlocked, env)
