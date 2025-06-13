@@ -1,2 +1,2 @@
-package keter-rate-limiting-plugin
-  tests: True
+packages: .
+tests: True
