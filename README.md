@@ -108,7 +108,7 @@ stack test
 ## Alternatives
 
 If you would like to use memory more efficiently (with fast, yet significant compression) there is alternative similar package that uses Google Snappy compression, see:
-[keter-rate-limiting-plugin-snappy](https://github.com/Oleksandr-Zhabenko/keter-rate-limiting-plugin)
+[keter-rate-limiting-plugin-snappy](https://github.com/Oleksandr-Zhabenko/keter-rate-limiting-plugin-snappy)
 
 ## Licence
 
