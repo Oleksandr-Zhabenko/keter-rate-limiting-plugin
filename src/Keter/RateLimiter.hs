@@ -11,7 +11,7 @@ Maintainer  : oleksandr.zhabenko@yahoo.com
 Stability   : stable
 Portability : portable
 
-This file is a ported to Haskell language code with some simlifications of rack-attack 
+This file is a ported to Haskell language code with some simplifications of rack-attack 
 https://github.com/rack/rack-attack/blob/main/lib/rack/attack.rb
 and is based on the structure of the original code of 
 rack-attack, Copyright (c) 2016 by Kickstarter, PBC, under the MIT License.
@@ -95,11 +95,13 @@ data Configuration = Configuration
   , configGetRequestIPZone :: Request -> IPZoneIdentifier
   }
 
+-- | For TokenBucket, use 'throttleTokenBucketTTL' to specify cache TTL (in seconds).
 data ThrottleConfig = ThrottleConfig
   { throttleLimit :: Int
   , throttlePeriod :: Int
   , throttleAlgorithm :: Algorithm
   , throttleIdentifier :: Request -> Maybe Text
+  , throttleTokenBucketTTL :: Maybe Int -- ^ Only used for TokenBucket, default: 7200 (2 hours)
   }
 
 data Algorithm = FixedWindow | SlidingWindow | TokenBucket | LeakyBucket
@@ -186,11 +188,13 @@ checkWithZone env throttleName throttleCfg req =
           return (not allowed)
         TokenBucket -> do
           let refillRate = fromIntegral (throttleLimit throttleCfg) / fromIntegral (throttlePeriod throttleCfg)
+              ttl = maybe 7200 id (throttleTokenBucketTTL throttleCfg) -- Default 2 hours if not set
           allowed <- TB.allowRequest
             (zscTokenBucketCache zoneCaches)
             fullKey
             (throttleLimit throttleCfg)
             refillRate
+            ttl
           return (not allowed)
         LeakyBucket -> do
           let leakRate = fromIntegral (throttleLimit throttleCfg) / fromIntegral (throttlePeriod throttleCfg)

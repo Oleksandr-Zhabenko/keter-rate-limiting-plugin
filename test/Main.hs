@@ -84,7 +84,13 @@ rateLimiterTests = testGroup "General Rate Limiter Tests (with Default IP Zone)"
 testFixedWindow :: IO ()
 testFixedWindow = do
   env <- initConfig testGetRequestIPZone
-  let throttleConfig = ThrottleConfig 3 10 FixedWindow (\req -> Just (requestIP req))
+  let throttleConfig = ThrottleConfig
+        { throttleLimit = 3
+        , throttlePeriod = 10
+        , throttleAlgorithm = FixedWindow
+        , throttleIdentifier = \req -> Just (requestIP req)
+        , throttleTokenBucketTTL = Nothing
+        }
       envWithThrottle = addThrottle env "test-throttle" throttleConfig
       requests = replicate 5 $ makeRequest genericTestIP "/test"
       expectedResponses = replicate 3 "Success" ++ replicate 2 "Too Many Requests"
@@ -93,7 +99,13 @@ testFixedWindow = do
 testSlidingWindow :: IO ()
 testSlidingWindow = do
   env <- initConfig testGetRequestIPZone
-  let throttleConfig = ThrottleConfig 3 10 SlidingWindow (\req -> Just (requestIP req))
+  let throttleConfig = ThrottleConfig
+        { throttleLimit = 3
+        , throttlePeriod = 10
+        , throttleAlgorithm = SlidingWindow
+        , throttleIdentifier = \req -> Just (requestIP req)
+        , throttleTokenBucketTTL = Nothing
+        }
       envWithThrottle = addThrottle env "test-throttle" throttleConfig
       requests = replicate 5 $ makeRequest genericTestIP "/test"
       expectedResponses = replicate 3 "Success" ++ replicate 2 "Too Many Requests"
@@ -101,20 +113,37 @@ testSlidingWindow = do
 
 testTokenBucket :: IO ()
 testTokenBucket = do
+  let ttlSeconds = 3
   env <- initConfig testGetRequestIPZone
-  let throttleConfig = ThrottleConfig 3 1 TokenBucket (\req -> Just (requestIP req))
+  let throttleConfig = ThrottleConfig
+        { throttleLimit = 3
+        , throttlePeriod = 1
+        , throttleAlgorithm = TokenBucket
+        , throttleIdentifier = \req -> Just (requestIP req)
+        , throttleTokenBucketTTL = Just ttlSeconds
+        }
       envWithThrottle = addThrottle env "test-throttle" throttleConfig
       requests = replicate 5 $ makeRequest genericTestIP "/test"
       expectedResponses = replicate 3 "Success" ++ replicate 2 "Too Many Requests"
   executeRequests envWithThrottle requests expectedResponses
-  threadDelay (2 * 1000000)
+  threadDelay ((ttlSeconds + 1) * 1000000)
   response <- attackMiddleware envWithThrottle (const (return "Success")) (makeRequest genericTestIP "/test")
-  assertEqual "Request should succeed after refill" "Success" response
+  assertEqual "Request should succeed after TTL expiry and refill" "Success" response
+  r1 <- attackMiddleware envWithThrottle (const (return "Success")) (makeRequest genericTestIP "/test")
+  r2 <- attackMiddleware envWithThrottle (const (return "Success")) (makeRequest genericTestIP "/test")
+  r3 <- attackMiddleware envWithThrottle (const (return "Success")) (makeRequest genericTestIP "/test")
+  assertEqual "Next two requests allowed after refill" ["Success", "Success", "Too Many Requests"] [r1, r2, r3]
 
 testLeakyBucket :: IO ()
 testLeakyBucket = do
   env <- initConfig testGetRequestIPZone
-  let throttleConfig = ThrottleConfig 3 10 LeakyBucket (\req -> Just (requestIP req))
+  let throttleConfig = ThrottleConfig
+        { throttleLimit = 3
+        , throttlePeriod = 10
+        , throttleAlgorithm = LeakyBucket
+        , throttleIdentifier = \req -> Just (requestIP req)
+        , throttleTokenBucketTTL = Nothing
+        }
       envWithThrottle = addThrottle env "test-throttle" throttleConfig
       requests = replicate 5 $ makeRequest genericTestIP "/test"
       expectedResponses = replicate 3 "Success" ++ replicate 2 "Too Many Requests"
@@ -126,7 +155,13 @@ testLeakyBucket = do
 testPathSpecificThrottle :: IO ()
 testPathSpecificThrottle = do
   env <- initConfig testGetRequestIPZone
-  let throttleConfig = ThrottleConfig 2 10 FixedWindow (\req -> if requestPath req == "/login" then Just (requestIP req <> ":" <> requestPath req) else Nothing)
+  let throttleConfig = ThrottleConfig
+        { throttleLimit = 2
+        , throttlePeriod = 10
+        , throttleAlgorithm = FixedWindow
+        , throttleIdentifier = \req -> if requestPath req == "/login" then Just (requestIP req <> ":" <> requestPath req) else Nothing
+        , throttleTokenBucketTTL = Nothing
+        }
       envWithThrottle = addThrottle env "login-throttle" throttleConfig
       loginRequests = replicate 3 $ makeRequest genericTestIP "/login"
       homeRequests = replicate 3 $ makeRequest genericTestIP "/home"
@@ -138,8 +173,20 @@ testPathSpecificThrottle = do
 testMultipleThrottles :: IO ()
 testMultipleThrottles = do
   env <- initConfig testGetRequestIPZone
-  let ipThrottleConfig = ThrottleConfig 5 10 FixedWindow (\req -> Just (requestIP req))
-      loginThrottleConfig = ThrottleConfig 2 10 SlidingWindow (\req -> if requestPath req == "/login" then Just (requestIP req <> ":" <> requestPath req) else Nothing)
+  let ipThrottleConfig = ThrottleConfig
+        { throttleLimit = 5
+        , throttlePeriod = 10
+        , throttleAlgorithm = FixedWindow
+        , throttleIdentifier = \req -> Just (requestIP req)
+        , throttleTokenBucketTTL = Nothing
+        }
+      loginThrottleConfig = ThrottleConfig
+        { throttleLimit = 2
+        , throttlePeriod = 10
+        , throttleAlgorithm = SlidingWindow
+        , throttleIdentifier = \req -> if requestPath req == "/login" then Just (requestIP req <> ":" <> requestPath req) else Nothing
+        , throttleTokenBucketTTL = Nothing
+        }
       envWithIpThrottle = addThrottle env "ip-throttle" ipThrottleConfig
       envWithBothThrottles = addThrottle envWithIpThrottle "login-throttle" loginThrottleConfig
       requests = [ makeRequest genericTestIP "/login"
@@ -157,7 +204,13 @@ testMultipleThrottles = do
 testOriginalResetAfterPeriod :: IO ()
 testOriginalResetAfterPeriod = do
   env1 <- initConfig testGetRequestIPZone
-  let throttleConfig = ThrottleConfig 2 1 FixedWindow (\req -> Just (requestIP req))
+  let throttleConfig = ThrottleConfig
+        { throttleLimit = 2
+        , throttlePeriod = 1
+        , throttleAlgorithm = FixedWindow
+        , throttleIdentifier = \req -> Just (requestIP req)
+        , throttleTokenBucketTTL = Nothing
+        }
       envWithThrottle1 = addThrottle env1 "test-throttle" throttleConfig
       requests1 = replicate 3 $ makeRequest genericTestIP "/test"
       expectedResponses1 = replicate 2 "Success" ++ ["Too Many Requests"]
@@ -174,7 +227,13 @@ testTimeBasedReset = do
   let periodSec = 1
       limit = 1
   env <- initConfig testGetRequestIPZone
-  let throttleConfig = ThrottleConfig limit periodSec FixedWindow (\req -> Just (requestIP req))
+  let throttleConfig = ThrottleConfig
+        { throttleLimit = limit
+        , throttlePeriod = periodSec
+        , throttleAlgorithm = FixedWindow
+        , throttleIdentifier = \req -> Just (requestIP req)
+        , throttleTokenBucketTTL = Nothing
+        }
       envWithThrottle = addThrottle env "reset-throttle" throttleConfig
   resp1 <- attackMiddleware envWithThrottle (const (return "Success")) (makeRequest ipForZoneA "/reset_test")
   assertEqual "First request to zone A should succeed" "Success" resp1
@@ -199,7 +258,13 @@ testIPZoneIsolation = do
   let limit = 1
       period = 10
   env <- initConfig testGetRequestIPZone
-  let throttleCfg = ThrottleConfig limit period FixedWindow (\req -> Just (requestIP req))
+  let throttleCfg = ThrottleConfig
+        { throttleLimit = limit
+        , throttlePeriod = period
+        , throttleAlgorithm = FixedWindow
+        , throttleIdentifier = \req -> Just (requestIP req)
+        , throttleTokenBucketTTL = Nothing
+        }
       envWithThrottle = addThrottle env "test-throttle" throttleCfg
       reqA1 = makeRequest ipForZoneA "/test"
       reqB1 = makeRequest ipForZoneB "/test"
@@ -213,7 +278,13 @@ testIPZoneIsolation = do
 testIPZoneDefaultFallback :: IO ()
 testIPZoneDefaultFallback = do
   env <- initConfig testGetRequestIPZone
-  let throttleConfig = ThrottleConfig 1 10 FixedWindow (\req -> Just (requestIP req))
+  let throttleConfig = ThrottleConfig
+        { throttleLimit = 1
+        , throttlePeriod = 10
+        , throttleAlgorithm = FixedWindow
+        , throttleIdentifier = \req -> Just (requestIP req)
+        , throttleTokenBucketTTL = Nothing
+        }
       envWithThrottle = addThrottle env "test-throttle" throttleConfig
       reqDefault = makeRequest ipForDefaultZone "/test"
       reqGeneric = makeRequest genericTestIP "/test"
@@ -225,7 +296,13 @@ testIPZoneDefaultFallback = do
 testIPZoneCacheResetAll :: IO ()
 testIPZoneCacheResetAll = do
   env <- initConfig testGetRequestIPZone
-  let throttleConfig = ThrottleConfig 1 10 FixedWindow (\req -> Just (requestIP req))
+  let throttleConfig = ThrottleConfig
+        { throttleLimit = 1
+        , throttlePeriod = 10
+        , throttleAlgorithm = FixedWindow
+        , throttleIdentifier = \req -> Just (requestIP req)
+        , throttleTokenBucketTTL = Nothing
+        }
       envWithThrottle = addThrottle env "test-throttle" throttleConfig
       reqA = makeRequest ipForZoneA "/test"
       reqB = makeRequest ipForZoneB "/test"

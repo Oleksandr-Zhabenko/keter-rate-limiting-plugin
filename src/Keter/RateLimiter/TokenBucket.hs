@@ -83,8 +83,9 @@ allowRequest
   -> T.Text                                  -- ^ Key (e.g. user identifier)
   -> Int                                     -- ^ Capacity (max tokens)
   -> Double                                  -- ^ Refill rate (tokens per second)
+  -> Int                                     -- ^ Expiry in seconds (cache TTL)
   -> m Bool                                  -- ^ Result: allowed or not
-allowRequest cache unprefixedKey capacity refillRate = liftIO $ do
+allowRequest cache unprefixedKey capacity refillRate expiresIn = liftIO $ do
   now <- floor <$> getPOSIXTime
   
   -- Read the token bucket state from cache
@@ -121,12 +122,11 @@ allowRequest cache unprefixedKey capacity refillRate = liftIO $ do
           newTokens = min capacity (oldTokens + addedTokens)
       in TokenBucketState newTokens (if addedTokens > 0 then nowTime else lastTime)
 
-    -- Write TokenBucketState encoded as JSON Text to cache with some expiration
+    -- Write TokenBucketState encoded as JSON Text to cache with user-specified expiration
     writeTokenState :: T.Text -> TokenBucketState -> IO ()
     writeTokenState key val = do
       let bs = encode val
           txt = case TE.decodeUtf8' (LBS.toStrict bs) of
-                  Left _ -> ""  -- Handle encoding error
+                  Left _ -> ""  -- Handle encoding error gracefully
                   Right decodedText -> decodedText
-          expiresIn = 2 * 3600  -- TTL should be greater than refill period
       writeCache cache key txt expiresIn
