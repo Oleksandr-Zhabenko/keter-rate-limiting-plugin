@@ -46,12 +46,16 @@ import Keter.RateLimiter.Snappy
 main :: IO ()
 main = do
   env <- initConfig (\req -> if requestIP req == "10.0.0.1" then "zoneA" else defaultIPZone)
-  let throttle = ThrottleConfig 10 60 FixedWindow (\req -> Just (requestIP req))
+  let throttle = ThrottleConfig
+        { throttleLimit = 10
+        , throttlePeriod = 60
+        , throttleAlgorithm = FixedWindow
+        , throttleIdentifier = \req -> Just (requestIP req)
+        , throttleTokenBucketTTL = Nothing
+        }
       env' = addThrottle env "ip-throttle" throttle
-  -- Wrap your application with attackMiddleware
   runApp $ attackMiddleware env' myApp
 ```
-
 
 ## Example Usage
 
@@ -65,13 +69,25 @@ v1 <- incStoreWithZone cache "login-throttle" "zoneX" "userX" 10 :: IO Int
 mVal <- readCacheWithZone cache "login-throttle" "zoneX" "userX" :: IO (Maybe Int)
 ```
 
-
 ### Using the Customisable API
 
 ```haskell
 let customKey = "login-throttle:zoneY:userY:extra"
 v1 <- incStore cache customKey 10 :: IO Int
 mVal <- readCache cache customKey :: IO (Maybe Int)
+```
+
+### Token Bucket Example (with TTL)
+
+```haskell
+let tokenBucketThrottle = ThrottleConfig
+      { throttleLimit = 5
+      , throttlePeriod = 60
+      , throttleAlgorithm = TokenBucket
+      , throttleIdentifier = \req -> Just (requestIP req)
+      , throttleTokenBucketTTL = Just 3600 -- TTL 1 hour
+      }
+    env'' = addThrottle env' "token-bucket" tokenBucketThrottle
 ```
 
 Both approaches are fully supported: wrappers are recommended for most use cases, but you retain complete control for special requirements.
