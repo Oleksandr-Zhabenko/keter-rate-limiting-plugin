@@ -41,7 +41,7 @@ build-depends: keter-rate-limiting-plugin
 ## Quick Start
 
 ```haskell
-import Keter.RateLimiter.Snappy
+import Keter.RateLimiter.WAI
 
 main :: IO ()
 main = do

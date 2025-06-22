@@ -15,8 +15,9 @@ maintainer:         oleksandr.zhabenko@yahoo.com
 copyright:          2025 Oleksandr Zhabenko
 category:           Network
 build-type:         Simple
-extra-doc-files:    CHANGELOG.md
--- extra-source-files:
+extra-doc-files:    CHANGELOG.md, README.md
+extra-source-files: README.md
+tested-with:        GHC ==9.2.8, GHC ==9.4.8, GHC ==9.6.5
 
 common warnings
     ghc-options: -Wall
@@ -24,7 +25,7 @@ common warnings
 library
     import:           warnings
     exposed-modules:
-        Keter.RateLimiter
+        Keter.RateLimiter.WAI
         Keter.RateLimiter.Cache
         Keter.RateLimiter.IPZones
         Keter.RateLimiter.SlidingWindow
@@ -38,6 +39,9 @@ library
         base >= 4.7 && < 5,
         text >= 1.2,
         bytestring >= 0.10,
+        wai        >=3.2.3 && <3.3,
+        network    >=3.1.2 && <3.2 || ^>=3.2.0,
+        http-types >=0.12.3 && <0.13,
         aeson >= 1.4,
         base64-bytestring >= 1.0,
         cache >= 0.1,
@@ -57,6 +61,9 @@ test-suite keter-rate-limiting-plugin-test
     main-is:          Main.hs
     build-depends:
         base >=4 && <5,
+        wai        >=3.2.3 && <3.3,
+        network    >=3.1.2 && <3.2 || ^>=3.2.0,
+        http-types >=0.12.3 && <0.13,
         bytestring >= 0.10,
         keter-rate-limiting-plugin,
         tasty >= 1.4 && < 1.5,

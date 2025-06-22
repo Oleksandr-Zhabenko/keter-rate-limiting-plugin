@@ -25,7 +25,7 @@ The module provides an abstract notification mechanism for rate limiting events 
 
 Rate limiting is a common technique used to control the amount of incoming requests or actions to a system, preventing abuse or overload. When a rate limit is exceeded, it is often necessary to notify relevant parties or systems to take appropriate action or log the event.
 
-This module defines a 'Notifier' type that encapsulates the notification strategy and provides several implementations, including a no-operation notifier and a console logger notifier.
+This module defines a 'Notifier' type that encapsulates the notification strategy and provides several implementations, including a no-operation notifier and a console logger notifier. Additionally, it provides WAI-specific notification types and functions for working with WAI requests.
 
 == Usage
 
@@ -33,6 +33,18 @@ To notify about a rate limit event, use the 'notify' function with an appropriat
 
 @
 notify consoleNotifier "loginAttempts" userRequest 100
+@
+
+For WAI requests, use the 'notifyWAI' function:
+
+@
+notifyWAI myWAINotifier "apiRequests" waiRequest 50
+@
+
+Or adapt an existing 'Notifier' to work with WAI requests:
+
+@
+waiNotifier consoleNotifier "loginAttempts" waiRequest 10
 @
 
 This will log a message to the console indicating that the 'loginAttempts' throttle has blocked the given request due to exceeding the limit of 100.
@@ -51,6 +63,11 @@ If your application does not require notifications for rate limiting events or h
 * 'notify' — function to trigger a notification
 * 'noopNotifier' — a notifier that performs no action
 * 'consoleNotifier' — a notifier that logs notifications to the console with timestamps
+* 'WAINotifier' — type for WAI-specific notifications
+* 'notifyWAI' — function to trigger WAI notifications
+* 'waiNotifier' — adapter to use regular Notifier with WAI requests
+* 'consoleWAINotifier' — a WAI notifier that logs notifications to the console with timestamps
+* 'noopWAINotifier' — a WAI notifier that performs no action
 
 -}
 
@@ -59,6 +76,12 @@ module Keter.RateLimiter.Notifications
   , notify
   , noopNotifier
   , consoleNotifier
+  , WAINotifier
+  , notifyWAI
+  , waiNotifier
+  , convertWAIRequest
+  , consoleWAINotifier
+  , noopWAINotifier
   ) where
 
 import qualified Data.Text as T
@@ -66,6 +89,10 @@ import Data.Text (Text)
 import qualified Data.Text.IO as TIO
 import Data.Time.Clock (getCurrentTime)
 import Data.Time.Format (formatTime, defaultTimeLocale)
+import Network.Wai (Request)
+import qualified Network.Wai as Wai
+import qualified Data.ByteString.Char8 as BS8
+import qualified Data.Text.Encoding as TE
 
 -- | Abstract notifier type encapsulating notification details and action.
 --
@@ -86,6 +113,15 @@ data Notifier = Notifier
     --   Arguments are: throttle name, action, item, and limit.
   }
 
+-- | WAI-specific notifier type for handling WAI Request objects directly.
+--
+-- This type is specialized for WAI applications and receives:
+--
+--   * The name of the throttle (e.g., "loginAttempts")
+--   * The WAI 'Request' object
+--   * The limit that was exceeded as an 'Int'
+type WAINotifier = Text -> Request -> Int -> IO ()
+
 -- | Notify about a rate limit event.
 --
 -- This function takes a 'Notifier', the throttle name, the request or item involved,
@@ -99,6 +135,46 @@ data Notifier = Notifier
 notify :: Show req => Notifier -> Text -> req -> Int -> IO ()
 notify notifier throttleName req limit =
   notifierAction notifier throttleName "blocked" (T.pack (show req)) limit
+
+-- | Notify about a rate limit event using a WAI-specific notifier.
+--
+-- This function takes a 'WAINotifier', the throttle name, a WAI 'Request',
+-- and the limit that was exceeded, then triggers the WAI notifier.
+--
+-- ==== __Example__
+--
+-- > notifyWAI myWAINotifier "apiRequests" waiRequest 50
+notifyWAI :: WAINotifier -> Text -> Request -> Int -> IO ()
+notifyWAI waiNotifierFunc throttleName waiReq limit =
+  waiNotifierFunc throttleName waiReq limit
+
+-- | Adapter function to use a regular 'Notifier' with WAI 'Request' objects.
+--
+-- This function converts a WAI 'Request' to 'Text' representation and then
+-- uses the provided 'Notifier' to handle the notification.
+--
+-- ==== __Example__
+--
+-- > waiNotifier consoleNotifier "loginAttempts" waiRequest 10
+waiNotifier :: Notifier -> Text -> Request -> Int -> IO ()
+waiNotifier notifier throttleName waiReq limit = 
+  notifierAction notifier throttleName "blocked" (convertWAIRequest waiReq) limit
+
+-- | Convert a WAI 'Request' to a 'Text' representation.
+--
+-- This function extracts key information from a WAI request including:
+-- method, path, query string, and remote host.
+--
+-- ==== __Example output__
+--
+-- > "GET /api/users?limit=10 from 192.168.1.100"
+convertWAIRequest :: Request -> Text
+convertWAIRequest req = 
+  let method = TE.decodeUtf8 $ Wai.requestMethod req
+      path = TE.decodeUtf8 $ Wai.rawPathInfo req
+      query = TE.decodeUtf8 $ Wai.rawQueryString req
+      remoteHost = " from " <> T.pack (show $ Wai.remoteHost req)
+  in method <> " " <> path <> query <> remoteHost
 
 -- | A 'Notifier' that performs no action.
 --
@@ -127,3 +203,26 @@ consoleNotifier = Notifier
         T.pack timestamp <> " - " <> throttle <> " " <>
         action <> " " <> item <> " (limit: " <> T.pack (show limit) <> ")"
   }
+
+-- | A 'WAINotifier' that performs no action.
+--
+-- Useful as a default or placeholder when WAI notification is not required.
+noopWAINotifier :: WAINotifier
+noopWAINotifier _ _ _ = return ()
+
+-- | A 'WAINotifier' that logs notifications to the console.
+--
+-- Each notification is printed with a timestamp, throttle name,
+-- WAI request details, and the limit exceeded.
+--
+-- ==== __Example output__
+--
+-- > 2025-06-12 20:31:00 - loginAttempts blocked GET /api/login from 192.168.1.100:8080 (limit: 10)
+consoleWAINotifier :: WAINotifier
+consoleWAINotifier throttleName req limit = do
+  now <- getCurrentTime
+  let timestamp = formatTime defaultTimeLocale "%Y-%m-%d %H:%M:%S" now
+      requestInfo = convertWAIRequest req
+  TIO.putStrLn $
+    T.pack timestamp <> " - " <> throttleName <> " blocked " <>
+    requestInfo <> " (limit: " <> T.pack (show limit) <> ")"

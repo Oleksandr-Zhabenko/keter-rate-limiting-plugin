@@ -7,9 +7,18 @@ import Test.Tasty
 import Test.Tasty.HUnit
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
+import qualified Data.Text as T
+import qualified Data.Text.Encoding as TE
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as LBS
 import Control.Concurrent (threadDelay)
+import Network.Wai (Request, Response, defaultRequest)
+import qualified Network.Wai as WAI
+import Network.HTTP.Types (methodGet)
+import Network.Socket (SockAddr(..))
+import Network.HTTP.Types.Status (statusCode)
 import Keter.RateLimiter.Cache
-import Keter.RateLimiter
+import Keter.RateLimiter.WAI
 
 main :: IO ()
 main = do
@@ -43,28 +52,60 @@ ipForDefaultZone = "30.0.0.1"
 genericTestIP = "192.168.1.1"
 genericTestIP2 = "192.168.1.2"
 
+-- Helper function to extract IP from WAI Request for zone determination
 testGetRequestIPZone :: Request -> IPZoneIdentifier
 testGetRequestIPZone req
-  | requestIP req == ipForZoneA = testIPZoneA
-  | requestIP req == ipForZoneB = testIPZoneB
-  | requestIP req == genericTestIP = defaultIPZone
-  | requestIP req == genericTestIP2 = defaultIPZone
-  | requestIP req == ipForDefaultZone = defaultIPZone
+  | getClientIP req == ipForZoneA = testIPZoneA
+  | getClientIP req == ipForZoneB = testIPZoneB
+  | getClientIP req == genericTestIP = defaultIPZone
+  | getClientIP req == genericTestIP2 = defaultIPZone
+  | getClientIP req == ipForDefaultZone = defaultIPZone
   | otherwise = defaultIPZone
 
+-- Helper to create a mock WAI Request with specified IP and path
 makeRequest :: Text -> Text -> Request
-makeRequest ip path = Request
-  { requestMethod = "GET"
-  , requestPath = path
-  , requestHost = "example.com"
-  , requestIP = ip
-  , requestHeaders = Map.empty
+makeRequest ip path = defaultRequest
+  { WAI.requestMethod = methodGet
+  , WAI.rawPathInfo = TE.encodeUtf8 path
+  , WAI.requestHeaderHost = Just "example.com"
+  , WAI.remoteHost = mockSockAddr ip
+  , WAI.requestHeaders = [("x-real-ip", TE.encodeUtf8 ip)]  -- Set IP via header for testing
   }
+
+-- Helper to create a mock SockAddr from IP string (simplified for testing)
+mockSockAddr :: Text -> SockAddr
+mockSockAddr ip = SockAddrInet 80 0  -- Simplified - in real tests you might parse the IP properly
+
+-- Mock application that always returns "Success"
+mockApp :: WAI.Application
+mockApp _ respond = respond $ WAI.responseLBS 
+  (toEnum 200) 
+  [("Content-Type", "text/plain")] 
+  "Success"
+
+-- Helper to extract response body as Text
+getResponseBody :: Response -> IO Text
+getResponseBody response = do
+  case response of
+    -- This is a simplified approach - in practice you'd need to handle the response streaming
+    _ -> return "Success"  -- For now, assume success responses
+
+-- Helper to check if response is rate limited
+isRateLimited :: Response -> Bool
+isRateLimited response = 
+  case response of
+    -- Check status code - simplified approach
+    _ -> False  -- You'll need to implement proper response checking
 
 executeRequests :: Env -> [Request] -> [Text] -> IO ()
 executeRequests env requests expectedResponses = do
-  actualResponses <- mapM (attackMiddleware env (const (return "Success"))) requests
+  actualResponses <- mapM (processRequest env) requests
   assertEqual "Responses should match expected" expectedResponses actualResponses
+  where
+    processRequest :: Env -> Request -> IO Text
+    processRequest testEnv req = do
+      blocked <- instrument testEnv req
+      return $ if blocked then "Too Many Requests" else "Success"
 
 --------------------------------------------------------------------------------
 -- Rate Limiter Tests
@@ -88,7 +129,7 @@ testFixedWindow = do
         { throttleLimit = 3
         , throttlePeriod = 10
         , throttleAlgorithm = FixedWindow
-        , throttleIdentifier = \req -> Just (requestIP req)
+        , throttleIdentifier = Just . getClientIP  -- Use WAI helper
         , throttleTokenBucketTTL = Nothing
         }
       envWithThrottle = addThrottle env "test-throttle" throttleConfig
@@ -103,7 +144,7 @@ testSlidingWindow = do
         { throttleLimit = 3
         , throttlePeriod = 10
         , throttleAlgorithm = SlidingWindow
-        , throttleIdentifier = \req -> Just (requestIP req)
+        , throttleIdentifier = Just . getClientIP
         , throttleTokenBucketTTL = Nothing
         }
       envWithThrottle = addThrottle env "test-throttle" throttleConfig
@@ -119,7 +160,7 @@ testTokenBucket = do
         { throttleLimit = 3
         , throttlePeriod = 1
         , throttleAlgorithm = TokenBucket
-        , throttleIdentifier = \req -> Just (requestIP req)
+        , throttleIdentifier = Just . getClientIP
         , throttleTokenBucketTTL = Just ttlSeconds
         }
       envWithThrottle = addThrottle env "test-throttle" throttleConfig
@@ -127,12 +168,12 @@ testTokenBucket = do
       expectedResponses = replicate 3 "Success" ++ replicate 2 "Too Many Requests"
   executeRequests envWithThrottle requests expectedResponses
   threadDelay ((ttlSeconds + 1) * 1000000)
-  response <- attackMiddleware envWithThrottle (const (return "Success")) (makeRequest genericTestIP "/test")
-  assertEqual "Request should succeed after TTL expiry and refill" "Success" response
-  r1 <- attackMiddleware envWithThrottle (const (return "Success")) (makeRequest genericTestIP "/test")
-  r2 <- attackMiddleware envWithThrottle (const (return "Success")) (makeRequest genericTestIP "/test")
-  r3 <- attackMiddleware envWithThrottle (const (return "Success")) (makeRequest genericTestIP "/test")
-  assertEqual "Next two requests allowed after refill" ["Success", "Success", "Too Many Requests"] [r1, r2, r3]
+  blocked <- instrument envWithThrottle (makeRequest genericTestIP "/test")
+  assertEqual "Request should succeed after TTL expiry and refill" False blocked
+  b1 <- instrument envWithThrottle (makeRequest genericTestIP "/test")
+  b2 <- instrument envWithThrottle (makeRequest genericTestIP "/test")
+  b3 <- instrument envWithThrottle (makeRequest genericTestIP "/test")
+  assertEqual "Next requests after refill" [False, False, True] [b1, b2, b3]
 
 testLeakyBucket :: IO ()
 testLeakyBucket = do
@@ -141,7 +182,7 @@ testLeakyBucket = do
         { throttleLimit = 3
         , throttlePeriod = 10
         , throttleAlgorithm = LeakyBucket
-        , throttleIdentifier = \req -> Just (requestIP req)
+        , throttleIdentifier = Just . getClientIP
         , throttleTokenBucketTTL = Nothing
         }
       envWithThrottle = addThrottle env "test-throttle" throttleConfig
@@ -149,8 +190,8 @@ testLeakyBucket = do
       expectedResponses = replicate 3 "Success" ++ replicate 2 "Too Many Requests"
   executeRequests envWithThrottle requests expectedResponses
   threadDelay (4 * 1000000)
-  response <- attackMiddleware envWithThrottle (const (return "Success")) (makeRequest genericTestIP "/test")
-  assertEqual "Request should succeed after leaking" "Success" response
+  blocked <- instrument envWithThrottle (makeRequest genericTestIP "/test")
+  assertEqual "Request should succeed after leaking" False blocked
 
 testPathSpecificThrottle :: IO ()
 testPathSpecificThrottle = do
@@ -159,7 +200,10 @@ testPathSpecificThrottle = do
         { throttleLimit = 2
         , throttlePeriod = 10
         , throttleAlgorithm = FixedWindow
-        , throttleIdentifier = \req -> if requestPath req == "/login" then Just (requestIP req <> ":" <> requestPath req) else Nothing
+        , throttleIdentifier = \req -> 
+            if getRequestPath req == "/login" 
+            then Just (getClientIP req <> ":" <> getRequestPath req) 
+            else Nothing
         , throttleTokenBucketTTL = Nothing
         }
       envWithThrottle = addThrottle env "login-throttle" throttleConfig
@@ -177,14 +221,17 @@ testMultipleThrottles = do
         { throttleLimit = 5
         , throttlePeriod = 10
         , throttleAlgorithm = FixedWindow
-        , throttleIdentifier = \req -> Just (requestIP req)
+        , throttleIdentifier = Just . getClientIP
         , throttleTokenBucketTTL = Nothing
         }
       loginThrottleConfig = ThrottleConfig
         { throttleLimit = 2
         , throttlePeriod = 10
         , throttleAlgorithm = SlidingWindow
-        , throttleIdentifier = \req -> if requestPath req == "/login" then Just (requestIP req <> ":" <> requestPath req) else Nothing
+        , throttleIdentifier = \req -> 
+            if getRequestPath req == "/login" 
+            then Just (getClientIP req <> ":" <> getRequestPath req) 
+            else Nothing
         , throttleTokenBucketTTL = Nothing
         }
       envWithIpThrottle = addThrottle env "ip-throttle" ipThrottleConfig
@@ -208,7 +255,7 @@ testOriginalResetAfterPeriod = do
         { throttleLimit = 2
         , throttlePeriod = 1
         , throttleAlgorithm = FixedWindow
-        , throttleIdentifier = \req -> Just (requestIP req)
+        , throttleIdentifier = Just . getClientIP
         , throttleTokenBucketTTL = Nothing
         }
       envWithThrottle1 = addThrottle env1 "test-throttle" throttleConfig
@@ -231,17 +278,17 @@ testTimeBasedReset = do
         { throttleLimit = limit
         , throttlePeriod = periodSec
         , throttleAlgorithm = FixedWindow
-        , throttleIdentifier = \req -> Just (requestIP req)
+        , throttleIdentifier = Just . getClientIP
         , throttleTokenBucketTTL = Nothing
         }
       envWithThrottle = addThrottle env "reset-throttle" throttleConfig
-  resp1 <- attackMiddleware envWithThrottle (const (return "Success")) (makeRequest ipForZoneA "/reset_test")
-  assertEqual "First request to zone A should succeed" "Success" resp1
-  resp2 <- attackMiddleware envWithThrottle (const (return "Success")) (makeRequest ipForZoneA "/reset_test")
-  assertEqual "Second request to zone A should be blocked" "Too Many Requests" resp2
+  blocked1 <- instrument envWithThrottle (makeRequest ipForZoneA "/reset_test")
+  assertEqual "First request to zone A should succeed" False blocked1
+  blocked2 <- instrument envWithThrottle (makeRequest ipForZoneA "/reset_test")
+  assertEqual "Second request to zone A should be blocked" True blocked2
   threadDelay ((periodSec * 1000000) + 200000)
-  resp3 <- attackMiddleware envWithThrottle (const (return "Success")) (makeRequest ipForZoneA "/reset_test")
-  assertEqual "Request after period to zone A should succeed" "Success" resp3
+  blocked3 <- instrument envWithThrottle (makeRequest ipForZoneA "/reset_test")
+  assertEqual "Request after period to zone A should succeed" False blocked3
 
 --------------------------------------------------------------------------------
 -- IP Zone Tests
@@ -262,18 +309,18 @@ testIPZoneIsolation = do
         { throttleLimit = limit
         , throttlePeriod = period
         , throttleAlgorithm = FixedWindow
-        , throttleIdentifier = \req -> Just (requestIP req)
+        , throttleIdentifier = Just . getClientIP
         , throttleTokenBucketTTL = Nothing
         }
       envWithThrottle = addThrottle env "test-throttle" throttleCfg
       reqA1 = makeRequest ipForZoneA "/test"
       reqB1 = makeRequest ipForZoneB "/test"
-  r1 <- attackMiddleware envWithThrottle (const (return "Success")) reqA1
-  assertEqual "Zone A first request allowed" "Success" r1
-  r2 <- attackMiddleware envWithThrottle (const (return "Success")) reqA1
-  assertEqual "Zone A second request blocked" "Too Many Requests" r2
-  r3 <- attackMiddleware envWithThrottle (const (return "Success")) reqB1
-  assertEqual "Zone B first request allowed" "Success" r3
+  b1 <- instrument envWithThrottle reqA1
+  assertEqual "Zone A first request allowed" False b1
+  b2 <- instrument envWithThrottle reqA1
+  assertEqual "Zone A second request blocked" True b2
+  b3 <- instrument envWithThrottle reqB1
+  assertEqual "Zone B first request allowed" False b3
 
 testIPZoneDefaultFallback :: IO ()
 testIPZoneDefaultFallback = do
@@ -282,16 +329,16 @@ testIPZoneDefaultFallback = do
         { throttleLimit = 1
         , throttlePeriod = 10
         , throttleAlgorithm = FixedWindow
-        , throttleIdentifier = \req -> Just (requestIP req)
+        , throttleIdentifier = Just . getClientIP
         , throttleTokenBucketTTL = Nothing
         }
       envWithThrottle = addThrottle env "test-throttle" throttleConfig
       reqDefault = makeRequest ipForDefaultZone "/test"
       reqGeneric = makeRequest genericTestIP "/test"
-  r1 <- attackMiddleware envWithThrottle (const (return "Success")) reqDefault
-  assertEqual "Default zone first request allowed" "Success" r1
-  r2 <- attackMiddleware envWithThrottle (const (return "Success")) reqGeneric
-  assertEqual "Generic IP default zone first request allowed" "Success" r2
+  b1 <- instrument envWithThrottle reqDefault
+  assertEqual "Default zone first request allowed" False b1
+  b2 <- instrument envWithThrottle reqGeneric
+  assertEqual "Generic IP default zone first request allowed" False b2
 
 testIPZoneCacheResetAll :: IO ()
 testIPZoneCacheResetAll = do
@@ -300,19 +347,19 @@ testIPZoneCacheResetAll = do
         { throttleLimit = 1
         , throttlePeriod = 10
         , throttleAlgorithm = FixedWindow
-        , throttleIdentifier = \req -> Just (requestIP req)
+        , throttleIdentifier = Just . getClientIP
         , throttleTokenBucketTTL = Nothing
         }
       envWithThrottle = addThrottle env "test-throttle" throttleConfig
       reqA = makeRequest ipForZoneA "/test"
       reqB = makeRequest ipForZoneB "/test"
-  _ <- attackMiddleware envWithThrottle (const (return "Success")) reqA
-  _ <- attackMiddleware envWithThrottle (const (return "Success")) reqB
+  _ <- instrument envWithThrottle reqA
+  _ <- instrument envWithThrottle reqB
   cacheResetAll envWithThrottle
-  rA <- attackMiddleware envWithThrottle (const (return "Success")) reqA
-  rB <- attackMiddleware envWithThrottle (const (return "Success")) reqB
-  assertEqual "Zone A request allowed after reset" "Success" rA
-  assertEqual "Zone B request allowed after reset" "Success" rB
+  b1 <- instrument envWithThrottle reqA
+  b2 <- instrument envWithThrottle reqB
+  assertEqual "Zone A after reset" False b1
+  assertEqual "Zone B after reset" False b2
 
 --------------------------------------------------------------------------------
 -- Cache API Tests (wrappers and manual keys)
