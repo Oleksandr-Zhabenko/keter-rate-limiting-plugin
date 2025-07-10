@@ -56,12 +56,13 @@ module Keter.RateLimiter.WAI
   , initConfig
   , addThrottle
   , ThrottleConfig(..)
-  , Algorithm(..)
   , cacheResetAll
   , IPZoneIdentifier
   , defaultIPZone
   , ZoneSpecificCaches
-  -- Wrappers for convenience (re-exported from Cache)
+  -- For convenience (re-exported from Cache)
+  , Algorithm(..)
+  , algorithmPrefix
   , makeCacheKey
   , incStoreWithZone
   , readCacheWithZone
@@ -118,9 +119,6 @@ data ThrottleConfig = ThrottleConfig
   , throttleTokenBucketTTL :: Maybe Int -- ^ Only used for TokenBucket, default: 7200 (2 hours)
   }
 
-data Algorithm = FixedWindow | SlidingWindow | TokenBucket | LeakyBucket
-  deriving (Show, Eq, Generic)
-
 -- | Default rate limit response (429 Too Many Requests)
 defaultRateLimitResponse :: Request -> Response
 defaultRateLimitResponse _ = WAI.responseLBS 
@@ -136,7 +134,7 @@ defaultConfiguration = Configuration
   , configRateLimitResponse = defaultRateLimitResponse
   }
 
--- 1. Initializaion of Env with IORef
+-- 1. Initialization of Env with IORef
 initConfig :: (Request -> IPZoneIdentifier) -> IO Env
 initConfig getIPZone = do
   let config = defaultConfiguration { configGetRequestIPZone = getIPZone }
@@ -187,7 +185,7 @@ checkWithZone env throttleName throttleCfg req =
           newCaches <- newZoneSpecificCaches
           modifyIORef' (envZoneCachesMap env) (Map.insert ipZone newCaches)
           return newCaches
-      let fullKey = makeCacheKey throttleName ipZone userKey
+      let fullKey = makeCacheKey (throttleAlgorithm throttleCfg) ipZone userKey
       isBlocked <- case throttleAlgorithm throttleCfg of
         FixedWindow -> do
           currentCount <- incStore (zscCounterCache zoneCaches) fullKey (throttlePeriod throttleCfg)
@@ -219,6 +217,9 @@ checkWithZone env throttleName throttleCfg req =
             leakRate
             ttl
           return (not allowed)
+        TinyLRU -> do
+          currentCount <- incStore (zscTinyLRUCache zoneCaches) fullKey (throttlePeriod throttleCfg)
+          return (currentCount > throttleLimit throttleCfg)
       when isBlocked $
         Notifications.notifyWAI
           (configNotifier config)

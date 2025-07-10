@@ -1,7 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE TypeApplications #-}
 
 {-|
 Module      : Keter.RateLimiter.TokenBucket
@@ -34,7 +32,7 @@ The bucket state is stored in a cache keyed by a user or client identifier.
 
 == Parameters of 'allowRequest'
 
-* Cache — the cache storing token bucket states.
+* Cache — the cache storing token bucket states, tagged with the TokenBucket algorithm.
 * Key — identifier for the bucket (e.g., user ID).
 * Capacity — maximum number of tokens in the bucket.
 * Refill rate — number of tokens added per second.
@@ -53,67 +51,54 @@ module Keter.RateLimiter.TokenBucket
   , allowRequest
   ) where
 
-import           Control.Monad.IO.Class (MonadIO, liftIO)
-import           Data.Aeson (FromJSON, ToJSON, encode, decodeStrict)
+import Control.Monad.IO.Class (MonadIO, liftIO)
+import Data.Aeson (FromJSON, ToJSON, encode, decodeStrict)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Data.ByteString.Lazy as LBS
-import           Data.Time.Clock.POSIX (getPOSIXTime)
-import           GHC.Generics (Generic)
-
-import           Keter.RateLimiter.Cache
+import Data.Time.Clock.POSIX (getPOSIXTime)
+import GHC.Generics (Generic)
+import Keter.RateLimiter.Cache
 
 -- | Represents the state of a token bucket.
 data TokenBucketState = TokenBucketState
-  { tokens     :: Int    -- ^ Current number of tokens available.
-  , lastUpdate :: Int    -- ^ Timestamp of last token refill (epoch seconds).
+  { tokens     :: Int
+  , lastUpdate :: Int
   } deriving (Show, Eq, Generic)
 
 instance ToJSON TokenBucketState
 instance FromJSON TokenBucketState
 
 -- | Attempt to allow a request based on the token bucket algorithm.
---
--- Returns 'True' if the request is allowed (token consumed), 'False' otherwise.
---
--- Tokens are refilled based on elapsed time and the refill rate.
 allowRequest
   :: MonadIO m
-  => Cache (InMemoryStore "token_bucket")
-  -> T.Text                                  -- ^ Key (e.g. user identifier)
-  -> Int                                     -- ^ Capacity (max tokens)
-  -> Double                                  -- ^ Refill rate (tokens per second)
-  -> Int                                     -- ^ Expiry in seconds (cache TTL)
-  -> m Bool                                  -- ^ Result: allowed or not
+  => Cache (InMemoryStore 'TokenBucket)
+  -> T.Text
+  -> Int
+  -> Double
+  -> Int
+  -> m Bool
 allowRequest cache unprefixedKey capacity refillRate expiresIn = liftIO $ do
   now <- floor <$> getPOSIXTime
-  
-  -- Read the token bucket state from cache
-  mStateText <- readCache cache unprefixedKey
-  
-  -- Decode JSON to TokenBucketState or initialize if missing
+  let key = makeCacheKey (cacheAlgorithm cache) "" unprefixedKey
+  mStateText <- readStore (cacheStore cache) (algorithmPrefix $ cacheAlgorithm cache) key
   let mstate = case mStateText of
                 Nothing -> Nothing
-                Just stateText -> 
+                Just stateText ->
                   case decodeStrict (TE.encodeUtf8 stateText) of
                     Nothing -> Nothing
                     Just s -> Just s
-
   let state = case mstate of
         Nothing -> TokenBucketState capacity now
         Just s  -> refill s now
-
   if tokens state > 0
     then do
-      -- Consume one token and write updated state back
       let newState = state { tokens = tokens state - 1 }
-      writeTokenState unprefixedKey newState
+      writeTokenState key newState
       return True
     else do
-      -- Important: update state even if request is denied (time may have passed)
-      writeTokenState unprefixedKey state
+      writeTokenState key state
       return False
-
   where
     refill :: TokenBucketState -> Int -> TokenBucketState
     refill (TokenBucketState oldTokens lastTime) nowTime =
@@ -121,12 +106,10 @@ allowRequest cache unprefixedKey capacity refillRate expiresIn = liftIO $ do
           addedTokens = floor $ elapsed * refillRate
           newTokens = min capacity (oldTokens + addedTokens)
       in TokenBucketState newTokens (if addedTokens > 0 then nowTime else lastTime)
-
-    -- Write TokenBucketState encoded as JSON Text to cache with user-specified expiration
     writeTokenState :: T.Text -> TokenBucketState -> IO ()
     writeTokenState key val = do
       let bs = encode val
           txt = case TE.decodeUtf8' (LBS.toStrict bs) of
-                  Left _ -> ""  -- Handle encoding error gracefully
+                  Left _ -> ""
                   Right decodedText -> decodedText
-      writeCache cache key txt expiresIn
+      writeStore (cacheStore cache) (algorithmPrefix $ cacheAlgorithm cache) key txt expiresIn

@@ -1,6 +1,5 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE DataKinds #-}
 
 {-|
 Module      : Keter.RateLimiter.SlidingWindow
@@ -27,7 +26,7 @@ This implementation stores timestamps as a list of integers (POSIX seconds) in a
 
 == Parameters of 'allowRequest'
 
-* Cache — the cache storing timestamp logs.
+* Cache — the cache storing timestamp logs, tagged with the SlidingWindow algorithm.
 * User key — identifier for the client or user.
 * Limit — maximum allowed requests within the period.
 * Period — sliding window duration in seconds.
@@ -44,31 +43,26 @@ module Keter.RateLimiter.SlidingWindow
   ( allowRequest
   ) where
 
-import Keter.RateLimiter.Cache (Cache(..), CacheStore(..), InMemoryStore)
+import Keter.RateLimiter.Cache
 import Data.Time.Clock.POSIX (getPOSIXTime)
 import Data.Text (Text)
 
 -- | Attempt to allow a request under the sliding window rate limiting algorithm.
---
--- Returns 'True' if the request is allowed, 'False' if the limit is exceeded.
---
--- The sliding window is defined by 'period' seconds, and the maximum allowed requests is 'limit'.
 allowRequest
-  :: Cache (InMemoryStore "timestamps")
-  -> Text     -- ^ User or client key
-  -> Int      -- ^ Maximum number of allowed requests within the period
-  -> Int      -- ^ Sliding window period in seconds
+  :: Cache (InMemoryStore 'SlidingWindow)
+  -> Text
+  -> Int
+  -> Int
   -> IO Bool
 allowRequest cache unprefixedKey limit period = do
   now <- floor <$> getPOSIXTime
-  let key = cachePrefix cache <> ":" <> unprefixedKey
-  maybeTimestamps <- readStore (cacheStore cache) (cachePrefix cache) key
+  let key = makeCacheKey (cacheAlgorithm cache) "" unprefixedKey
+  maybeTimestamps <- readStore (cacheStore cache) (algorithmPrefix $ cacheAlgorithm cache) key
   let timestamps = maybe [] id maybeTimestamps
       recent = filter (\ts -> now - ts < period) timestamps
       newTimestamps = recent ++ [now]
   if length recent >= limit
     then return False
     else do
-      -- Update cache with new timestamps list and TTL equal to period
-      writeStore (cacheStore cache) (cachePrefix cache) key newTimestamps period
+      writeStore (cacheStore cache) (algorithmPrefix $ cacheAlgorithm cache) key newTimestamps period
       return True

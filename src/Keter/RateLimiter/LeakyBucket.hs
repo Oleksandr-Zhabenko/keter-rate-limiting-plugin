@@ -1,6 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE DataKinds #-}
 
 {-|
 Module      : Keter.RateLimiter.LeakyBucket
@@ -27,7 +26,7 @@ This implementation stores the bucket state in a cache, allowing distributed or 
 
 == Parameters of 'allowRequest'
 
-* Cache — the cache storing the leaky bucket states.
+* Cache — the cache storing the leaky bucket states, tagged with the LeakyBucket algorithm.
 * Key — identifier for the bucket (e.g., user or IP).
 * Capacity — maximum bucket level (number of requests allowed before blocking).
 * Leak rate — the rate at which the bucket leaks (units per second).
@@ -51,22 +50,17 @@ import Data.Time.Clock.POSIX (getPOSIXTime)
 import Data.Text (Text)
 
 -- | Attempt to allow a request under the leaky bucket rate limiting algorithm.
---
--- Returns 'True' if the request is allowed, 'False' if it exceeds the capacity.
---
--- The bucket leaks at a constant rate specified by 'leakRate' (units per second).
--- The bucket state is stored in the provided cache with a time-to-live (TTL).
 allowRequest
-  :: Cache (InMemoryStore "leaky_bucket")
-  -> Text   -- ^ Key identifying the bucket (e.g., user ID, IP address)
-  -> Int    -- ^ Capacity of the bucket (maximum allowed level)
-  -> Double -- ^ Leak rate (units per second)
-  -> Int    -- ^ TTL for the cache entry (seconds)
+  :: Cache (InMemoryStore 'LeakyBucket)
+  -> Text
+  -> Int
+  -> Double
+  -> Int
   -> IO Bool
 allowRequest cache unprefixedKey capacity leakRate ttl = do
   now <- floor <$> getPOSIXTime
-  let key = cachePrefix cache <> ":" <> unprefixedKey
-  mstate <- readStore (cacheStore cache) (cachePrefix cache) key
+  let key = makeCacheKey (cacheAlgorithm cache) "" unprefixedKey
+  mstate <- readStore (cacheStore cache) (algorithmPrefix $ cacheAlgorithm cache) key
 
   let state = case mstate of
         Nothing -> LeakyBucketState 0 now
@@ -75,15 +69,12 @@ allowRequest cache unprefixedKey capacity leakRate ttl = do
   if level state < fromIntegral capacity
     then do
       let newState = state { level = level state + 1 }
-      writeStore (cacheStore cache) (cachePrefix cache) key newState ttl
+      writeStore (cacheStore cache) (algorithmPrefix $ cacheAlgorithm cache) key newState ttl
       return True
     else do
-      -- Update state even if request is denied to reflect leaking
-      writeStore (cacheStore cache) (cachePrefix cache) key state ttl
+      writeStore (cacheStore cache) (algorithmPrefix $ cacheAlgorithm cache) key state ttl
       return False
-
   where
-    -- | Calculate the new bucket state after leaking since the last update.
     leak :: LeakyBucketState -> Int -> LeakyBucketState
     leak (LeakyBucketState oldLevel lastTime) nowTime =
       let delta = fromIntegral (nowTime - lastTime) :: Double
