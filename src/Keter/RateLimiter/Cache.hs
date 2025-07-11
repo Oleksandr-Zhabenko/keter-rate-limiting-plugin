@@ -144,7 +144,8 @@ deleteCache cache unprefixedKey =
 incStore :: (CacheStore store v IO, FromJSON v, ToJSON v, Ord v, Num v) => Cache store -> Text -> Int -> IO v
 incStore cache unprefixedKey expiresIn = do
   let fullKey = algorithmPrefix (cacheAlgorithm cache) <> ":" <> unprefixedKey
-  mval <- readStore (cacheStore cache) (algorithmPrefix $ cacheAlgorithm cache) fullKey
+      prefix  = algorithmPrefix $ cacheAlgorithm cache
+  mval <- readStore (cacheStore cache) prefix fullKey
   let newVal = case mval of
         Nothing -> 1
         Just v  -> if v <= 0 then 1 else v + 1
@@ -164,7 +165,7 @@ instance CacheStore (InMemoryStore 'SlidingWindow) [Int] IO where
   readStore (TimestampStore ref) _prefix key = do
     cache <- atomically $ readTVar ref
     -- Force cleanup of expired entries first
-    C.purgeExpired cache
+    -- C.purgeExpired cache  - not needed according to ChatGPT - to be checked!
     mval <- C.lookup cache key
     case mval of
       Nothing -> return Nothing
@@ -172,7 +173,7 @@ instance CacheStore (InMemoryStore 'SlidingWindow) [Int] IO where
   writeStore (TimestampStore ref) _prefix key val expiresIn = do
     cache <- atomically $ readTVar ref
     -- Force cleanup of expired entries first
-    C.purgeExpired cache
+    -- C.purgeExpired cache  - not needed according to ChatGPT - to be checked! 
     let bs = encode val
         strictBs = LBS.toStrict bs
         jsonTxt = case decodeUtf8' strictBs of
@@ -190,7 +191,7 @@ instance CacheStore (InMemoryStore 'FixedWindow) Int IO where
   readStore (CounterStore ref) _prefix key = do
     cache <- atomically $ readTVar ref
     -- Force cleanup of expired entries first
-    C.purgeExpired cache
+    -- C.purgeExpired cache  - not needed according to ChatGPT - to be checked!
     mval <- C.lookup cache key
     case mval of
       Nothing -> return Nothing
@@ -198,7 +199,7 @@ instance CacheStore (InMemoryStore 'FixedWindow) Int IO where
   writeStore (CounterStore ref) _prefix key val expiresIn = do
     cache <- atomically $ readTVar ref
     -- Force cleanup of expired entries first
-    C.purgeExpired cache
+    -- C.purgeExpired cache  - not needed according to ChatGPT - to be checked!
     let bs = encode val
         strictBs = LBS.toStrict bs
         jsonTxt = case decodeUtf8' strictBs of
@@ -215,12 +216,12 @@ instance CacheStore (InMemoryStore 'TokenBucket) Text IO where
   readStore (TokenBucketStore ref) _prefix key = do
     cache <- atomically $ readTVar ref
     -- Force cleanup of expired entries first
-    C.purgeExpired cache
+    -- C.purgeExpired cache  - not needed according to ChatGPT - to be checked!
     C.lookup cache key
   writeStore (TokenBucketStore ref) _prefix key val expiresIn = do
     cache <- atomically $ readTVar ref
     -- Force cleanup of expired entries first
-    C.purgeExpired cache
+    -- C.purgeExpired cache  - not needed according to ChatGPT - to be checked!
     expiryTimeSpec <- secondsToTimeSpec expiresIn
     C.insert' cache (Just expiryTimeSpec) key val
   deleteStore (TokenBucketStore ref) _prefix key = do
@@ -232,7 +233,7 @@ instance CacheStore (InMemoryStore 'LeakyBucket) LeakyBucketState IO where
   readStore (LeakyBucketStore ref) _prefix key = do
     cache <- atomically $ readTVar ref
     -- Force cleanup of expired entries first
-    C.purgeExpired cache
+    -- C.purgeExpired cache  - not needed according to ChatGPT - to be checked!
     mval <- C.lookup cache key
     case mval of
       Nothing -> return Nothing
@@ -240,7 +241,7 @@ instance CacheStore (InMemoryStore 'LeakyBucket) LeakyBucketState IO where
   writeStore (LeakyBucketStore ref) _prefix key val expiresIn = do
     cache <- atomically $ readTVar ref
     -- Force cleanup of expired entries first
-    C.purgeExpired cache
+    -- C.purgeExpired cache  - not needed according to ChatGPT - to be checked!
     let bs = encode val
         strictBs = LBS.toStrict bs
         jsonTxt = case decodeUtf8' strictBs of
