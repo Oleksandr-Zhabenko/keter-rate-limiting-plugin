@@ -31,6 +31,7 @@ import Keter.RateLimiter.WAI
   ( Env, ZoneSpecificCaches(..), ThrottleConfig(..), initConfig, addThrottle, 
     instrument, getClientIP, getRequestPath, defaultIPZone, envZoneCachesMap, cacheResetAll )
 import TinyLRUTests (tests)
+import Keter.RateLimiter.Cache.PurgeTests
 
 -- IPs and Zone Identifiers for testing
 testIPZoneA, testIPZoneB :: IPZoneIdentifier
@@ -103,6 +104,7 @@ tests = testGroup "Rate Limiter and IP Zones Tests"
   , rateLimiterTests
   , ipZoneTests
   , cacheApiTests
+  , testBackgroundPurge -- For testing of the background purging of the expired keys to prevent memory leakage conditions
   ]
 
 -- Rate Limiter Tests

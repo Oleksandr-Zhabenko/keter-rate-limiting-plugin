@@ -24,6 +24,7 @@ module Keter.RateLimiter.Cache
   , createInMemoryStore
   , clearInMemoryStore
   , cacheReset
+  , startAutoPurge
   , makeCacheKey
   , incStoreWithZone
   , readCacheWithZone
@@ -33,6 +34,9 @@ module Keter.RateLimiter.Cache
 
 import Control.Concurrent.STM
 import Control.Monad.IO.Class (MonadIO, liftIO)
+import Control.Monad (void, forever)
+import Control.Concurrent (forkIO, threadDelay)
+import Data.Hashable (Hashable(..))
 import Data.Aeson (ToJSON, FromJSON, decodeStrict, encode)
 import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
@@ -94,18 +98,36 @@ secondsToTimeSpec seconds = do
   now <- getTime Monotonic
   return $ now + TimeSpec (fromIntegral seconds) 0
 
--- | Create store instances for each Algorithm.
+-- | A background purge of the expired items in cache. Is needed to prevent memory leakage conditions with unused keys.
+startAutoPurge :: (Hashable k) => C.Cache k v -> Int -> IO ()
+startAutoPurge cache intervalSeconds = void . forkIO $ forever $ do
+  threadDelay (intervalSeconds * 1000000)
+  C.purgeExpired cache
+
+-- | Create store instances for each Algorithm, with background purge thread.
 instance CreateStore 'FixedWindow where
-  createStore = CounterStore <$> (C.newCache Nothing >>= newTVarIO)
+  createStore = do
+    raw <- C.newCache Nothing
+    startAutoPurge raw 60  -- purge every 60 seconds
+    CounterStore <$> newTVarIO raw
 
 instance CreateStore 'SlidingWindow where
-  createStore = TimestampStore <$> (C.newCache Nothing >>= newTVarIO)
+  createStore = do
+    raw <- C.newCache Nothing
+    startAutoPurge raw 60
+    TimestampStore <$> newTVarIO raw
 
 instance CreateStore 'TokenBucket where
-  createStore = TokenBucketStore <$> (C.newCache Nothing >>= newTVarIO)
+  createStore = do
+    raw <- C.newCache Nothing
+    startAutoPurge raw 60
+    TokenBucketStore <$> newTVarIO raw
 
 instance CreateStore 'LeakyBucket where
-  createStore = LeakyBucketStore <$> (C.newCache Nothing >>= newTVarIO)
+  createStore = do
+    raw <- C.newCache Nothing
+    startAutoPurge raw 60
+    LeakyBucketStore <$> newTVarIO raw
 
 instance CreateStore 'TinyLRU where
   createStore = TinyLRUStore <$> (atomically $ newTVar =<< TinyLRU.initTinyLRU 100)
