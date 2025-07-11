@@ -1,4 +1,4 @@
-{-# LANGUAGE DataKinds, FlexibleContexts, OverloadedStrings, RankNTypes, TypeApplications, ScopedTypeVariables #-}
+{-# LANGUAGE DataKinds, FlexibleContexts, GADTs, OverloadedStrings, RankNTypes, TypeApplications, ScopedTypeVariables #-}
 
 module TinyLRUTests where
 
