@@ -1,6 +1,7 @@
 -- test/Main.hs
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE GADTs #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE NumericUnderscores #-}
 
