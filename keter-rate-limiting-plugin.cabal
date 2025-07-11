@@ -54,10 +54,12 @@ library
         mtl >=2.2.2 && <2.3 || ^>=2.3.1,
         deepseq,
         list-t >=1.0.5 && <2,
+        network >=3.1.2 && <3.2 || ^>=3.2.0,
         -- transformers >=0.5.6 && <0.7,
         unordered-containers >=0.2.17 && <0.3,
         hashable >= 1.4.2.0 && < 2,
         clock >= 0.8.3 && < 1
+    extra-libraries:  z
     hs-source-dirs:   src
     default-language: Haskell2010
 
@@ -67,16 +69,27 @@ test-suite keter-rate-limiting-plugin-test
     type:             exitcode-stdio-1.0
     hs-source-dirs:   test
     main-is:          Main.hs
+    other-modules:   
+        Keter.RateLimiter.Cache.PurgeTests
+        Keter.RateLimiter.IPZonesTests
+        Keter.RateLimiter.LeakyBucketStateTests
+        Keter.RateLimiter.NotificationTests
+        Keter.RateLimiter.SlidingWindowTests
+        Keter.RateLimiter.TokenBucketTests
+        Keter.RateLimiter.WAITests
+        TinyLRUTests
     build-depends:
         base >=4 && <5,
         async >=2.2.4 && <2.3,
         wai        >=3.2.3 && <3.3,
+        wai-extra >= 3.0.3 && < 3.2,
         network    >=3.1.2 && <3.2 || ^>=3.2.0,
         http-types >=0.12.3 && <0.13,
         directory >= 1.3.4.0 && <1.4,
         HUnit,
         aeson >= 1.4,
         bytestring >= 0.10,
+        case-insensitive >=1.2.1.0,
         keter-rate-limiting-plugin,
         tasty >= 1.4 && < 1.6,
         filepath >=1.4.2 && <1.6,
@@ -91,5 +104,6 @@ test-suite keter-rate-limiting-plugin-test
         containers >= 0.6,
         time >= 1.9,
         hashable >= 1.4.2.0 && < 2,
-        clock >= 0.8.3 && < 1
+        clock >= 0.8.3 && < 1,
+        temporary >= 1.3 && < 1.4
     -- extra-libraries: 

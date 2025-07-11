@@ -1,5 +1,6 @@
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE NamedFieldPuns #-}
 
 {-|
 Module      : Keter.RateLimiter.LeakyBucketState
@@ -29,7 +30,6 @@ This state is essential for tracking and updating the bucket's status as request
 
 The module provides automatic JSON serialization and deserialization via 'ToJSON' and 'FromJSON'
 instances, facilitating storage and transmission of the state.
-
 -}
 
 module Keter.RateLimiter.LeakyBucketState
@@ -37,7 +37,8 @@ module Keter.RateLimiter.LeakyBucketState
   ) where
 
 import GHC.Generics (Generic)
-import Data.Aeson (ToJSON, FromJSON)
+import Data.Aeson (ToJSON, FromJSON(..), withObject, (.:))
+import Control.Monad (when, fail)
 
 -- | Represents the state of a leaky bucket in the rate limiter.
 data LeakyBucketState = LeakyBucketState
@@ -46,4 +47,11 @@ data LeakyBucketState = LeakyBucketState
   } deriving (Show, Eq, Generic)
 
 instance ToJSON LeakyBucketState
-instance FromJSON LeakyBucketState
+
+instance FromJSON LeakyBucketState where
+  parseJSON = withObject "LeakyBucketState" $ \o -> do
+    level <- o .: "level"
+    when (level < 0) $ fail "level must be non-negative"
+    when (level > 1000000) $ fail "level must not exceed 1000000"
+    lastTime <- o .: "lastTime"
+    return LeakyBucketState { level, lastTime }

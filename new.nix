@@ -6,11 +6,12 @@ pkgs.haskellPackages.mkDerivation {
   src = ./.;
   libraryHaskellDepends = with pkgs.haskellPackages; [
     aeson base base64-bytestring bytestring cache clock containers
-    hashable http-types network text time wai mtl list-t stm-containers stm
+    hashable http-types network text network time wai mtl list-t stm-containers stm
   ];
+  librarySystemDepends = [ pkgs.zlib ];
   testHaskellDepends = with pkgs.haskellPackages; [
-    base bytestring containers http-types network tasty HUnit tasty-hunit
-    text wai stm-containers stm async random
+    base bytestring containers http-types network tasty HUnit case-insensitive
+    tasty-hunit wai-extra temporary text wai network stm-containers stm async random
   ];
   homepage = "https://github.com/Oleksandr-Zhabenko/keter-rate-limiting-plugin";
   description = "Simple Keter rate limiting plugin";

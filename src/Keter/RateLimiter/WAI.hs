@@ -72,6 +72,10 @@ module Keter.RateLimiter.WAI
   , getClientIP
   , getRequestPath
   , getRequestMethod
+  , byIP
+  , byIPAndPath
+  , byIPAndUserAgent
+  , byHeaderAndIP
   ) where
 
 import qualified Data.Map.Strict as Map

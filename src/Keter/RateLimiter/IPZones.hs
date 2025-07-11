@@ -59,6 +59,7 @@ module Keter.RateLimiter.IPZones
   , resetSingleZoneCaches
   , resetZoneCache
   , newZoneSpecificCaches
+  , sockAddrToIPZone 
   ) where
 
 import Data.Text (Text)
@@ -70,6 +71,10 @@ import Keter.RateLimiter.Cache
   , cacheReset
   , Algorithm(..)
   )
+import Network.Socket (SockAddr(..))
+import qualified Data.Text as T (pack, intercalate)
+import Data.Bits
+import Text.Printf (printf)
 
 -- | Type alias representing an identifier for an IP zone, supporting IPv4 and IPv6 addresses.
 type IPZoneIdentifier = Text
@@ -124,3 +129,15 @@ resetZoneCache zsc algorithm = case algorithm of
 -- | Alias for 'createZoneCaches'.
 newZoneSpecificCaches :: IO ZoneSpecificCaches
 newZoneSpecificCaches = createZoneCaches
+
+-- | Convert a socket address to an IP zone identifier
+sockAddrToIPZone :: SockAddr -> IO Text
+sockAddrToIPZone (SockAddrInet _ hostAddr) = do
+    let a = fromIntegral $ (hostAddr `shiftR` 24) .&. 0xFF
+        b = fromIntegral $ (hostAddr `shiftR` 16) .&. 0xFF
+        c = fromIntegral $ (hostAddr `shiftR` 8) .&. 0xFF
+        d = fromIntegral $ hostAddr .&. 0xFF
+    return $ T.pack $ show a ++ "." ++ show b ++ "." ++ show c ++ "." ++ show d
+sockAddrToIPZone (SockAddrInet6 _ _ (w1, w2, w3, w4) _) =
+    return $ T.intercalate ":" $ map (T.pack . printf "%04x") [w1 `shiftR` 16, w1 .&. 0xFFFF, w2 `shiftR` 16, w2 .&. 0xFFFF, w3 `shiftR` 16, w3 .&. 0xFFFF, w4 `shiftR` 16, w4 .&. 0xFFFF]
+sockAddrToIPZone _ = return "default"

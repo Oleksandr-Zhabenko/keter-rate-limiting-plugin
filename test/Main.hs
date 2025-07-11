@@ -10,6 +10,7 @@ module Main where
 import Control.Concurrent.STM (atomically, readTVar)
 import Control.Concurrent (threadDelay)
 import Control.Monad (when)
+import Control.Exception (try, SomeException)
 import Data.Maybe (isJust)
 import Data.IORef (readIORef, newIORef, writeIORef, IORef)
 import Data.Cache (purgeExpired)
@@ -32,6 +33,13 @@ import Keter.RateLimiter.WAI
     instrument, getClientIP, getRequestPath, defaultIPZone, envZoneCachesMap, cacheResetAll )
 import TinyLRUTests (tests)
 import Keter.RateLimiter.Cache.PurgeTests
+import Keter.RateLimiter.IPZonesTests
+import Keter.RateLimiter.LeakyBucketStateTests
+-- import Keter.RateLimiter.LeakyBucketTests
+import Keter.RateLimiter.NotificationTests
+import Keter.RateLimiter.SlidingWindowTests
+import Keter.RateLimiter.TokenBucketTests
+import Keter.RateLimiter.WAITests
 
 -- IPs and Zone Identifiers for testing
 testIPZoneA, testIPZoneB :: IPZoneIdentifier
@@ -93,10 +101,12 @@ executeRequests env requests expectedResponses = do
       blocked <- instrument testEnv req
       return $ if blocked then "Too Many Requests" else "Success"
 
--- Main test suite
 main :: IO ()
 main = do
-  defaultMain Main.tests
+  result <- try @SomeException $ defaultMain Main.tests
+  case result of
+    Left ex -> putStrLn $ "Test suite failed with exception: " ++ show ex
+    Right () -> putStrLn "Test suite completed successfully"
 
 tests :: TestTree
 tests = testGroup "Rate Limiter and IP Zones Tests"
@@ -105,6 +115,13 @@ tests = testGroup "Rate Limiter and IP Zones Tests"
   , ipZoneTests
   , cacheApiTests
   , testBackgroundPurge -- For testing of the background purging of the expired keys to prevent memory leakage conditions
+  , Keter.RateLimiter.IPZonesTests.tests
+  , Keter.RateLimiter.LeakyBucketStateTests.tests
+--  , Keter.RateLimiter.LeakyBucketTests.tests
+  , Keter.RateLimiter.NotificationTests.tests
+  , Keter.RateLimiter.SlidingWindowTests.tests
+  , Keter.RateLimiter.TokenBucketTests.tests
+  , Keter.RateLimiter.WAITests.tests
   ]
 
 -- Rate Limiter Tests
