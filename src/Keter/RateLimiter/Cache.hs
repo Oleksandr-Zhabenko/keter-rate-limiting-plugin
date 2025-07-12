@@ -36,7 +36,9 @@ module Keter.RateLimiter.Cache
 import Control.Concurrent.STM
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad (void, forever)
-import Control.Concurrent (forkIO, threadDelay)
+import Control.Concurrent (forkIO, threadDelay, killThread, ThreadId)
+import Control.Concurrent.MVar (MVar, newEmptyMVar, tryPutMVar, tryTakeMVar)
+import Control.Exception (bracket, throwIO, AsyncException(ThreadKilled))
 import Data.Hashable (Hashable(..))
 import Data.Aeson (ToJSON, FromJSON, decodeStrict, encode)
 import qualified Data.ByteString.Lazy as LBS
@@ -99,36 +101,48 @@ secondsToTimeSpec seconds = do
   now <- getTime Monotonic
   return $ now + TimeSpec (fromIntegral seconds) 0
 
--- | A background purge of the expired items in cache. Is needed to prevent memory leakage conditions with unused keys.
+-- | Start a background purge thread that terminates when signaled via MVar.
 startAutoPurge :: (Hashable k) => C.Cache k v -> Int -> IO ()
-startAutoPurge cache intervalSeconds = void . forkIO $ forever $ do
-  threadDelay (intervalSeconds * 1000000)
-  C.purgeExpired cache
+startAutoPurge cache intervalSeconds = do
+  stopSignal <- newEmptyMVar
+  void $ forkIO $ forever $ do
+    threadDelay (intervalSeconds * 1000000)
+    stop <- tryTakeMVar stopSignal
+    case stop of
+      Just () -> throwIO ThreadKilled  -- Explicitly terminate the thread
+      Nothing -> C.purgeExpired cache
 
--- | Create store instances for each Algorithm, with background purge thread.
-instance CreateStore 'FixedWindow where
-  createStore = do
+-- | General function to create a store with a purge thread, using bracket for cleanup.
+createStoreWith :: (TVar (C.Cache Text Text) -> InMemoryStore a) -> IO (InMemoryStore a)
+createStoreWith mkStore = bracket
+  (do
     raw <- C.newCache Nothing
-    startAutoPurge raw 60  -- purge every 60 seconds
-    CounterStore <$> newTVarIO raw
+    stopSignal <- newEmptyMVar
+    tid <- forkIO $ forever $ do
+      threadDelay (60 * 1000000)
+      stop <- tryTakeMVar stopSignal
+      case stop of
+        Just () -> throwIO ThreadKilled  -- Explicitly terminate the thread
+        Nothing -> C.purgeExpired raw
+    tvar <- newTVarIO raw
+    return (tvar, stopSignal, tid))
+  (\(_, stopSignal, tid) -> do
+    void $ tryPutMVar stopSignal ()
+    killThread tid)
+  (\(tvar, _, _) -> return $ mkStore tvar)
+
+-- | Create store instances for each Algorithm.
+instance CreateStore 'FixedWindow where
+  createStore = createStoreWith CounterStore
 
 instance CreateStore 'SlidingWindow where
-  createStore = do
-    raw <- C.newCache Nothing
-    startAutoPurge raw 60
-    TimestampStore <$> newTVarIO raw
+  createStore = createStoreWith TimestampStore
 
 instance CreateStore 'TokenBucket where
-  createStore = do
-    raw <- C.newCache Nothing
-    startAutoPurge raw 60
-    TokenBucketStore <$> newTVarIO raw
+  createStore = createStoreWith TokenBucketStore
 
 instance CreateStore 'LeakyBucket where
-  createStore = do
-    raw <- C.newCache Nothing
-    startAutoPurge raw 60
-    LeakyBucketStore <$> newTVarIO raw
+  createStore = createStoreWith LeakyBucketStore
 
 instance CreateStore 'TinyLRU where
   createStore = TinyLRUStore <$> (atomically $ newTVar =<< TinyLRU.initTinyLRU 100)
@@ -184,78 +198,82 @@ cacheReset (Cache _ store) = resetStore store
 
 -- | Instance for storing Int lists (timestamps) for SlidingWindow
 instance CacheStore (InMemoryStore 'SlidingWindow) [Int] IO where
-  readStore (TimestampStore ref) _prefix key = do
-    cache <- atomically $ readTVar ref
+  readStore (TimestampStore tvar) _prefix key = do
+    cache <- readTVarIO tvar
     mval <- C.lookup cache key
     case mval of
       Nothing -> return Nothing
       Just txt -> return $ decodeStrict (encodeUtf8 txt)
-  writeStore (TimestampStore ref) _prefix key val expiresIn = do
-    cache <- atomically $ readTVar ref
+  writeStore (TimestampStore tvar) _prefix key val expiresIn = do
     let bs = encode val
         strictBs = LBS.toStrict bs
         jsonTxt = case decodeUtf8' strictBs of
                     Left _ -> ""
                     Right txt -> txt
     expiryTimeSpec <- secondsToTimeSpec expiresIn
-    atomically $ C.insertSTM key jsonTxt cache (Just expiryTimeSpec)
-  deleteStore (TimestampStore ref) _prefix key = do
-    cache <- atomically $ readTVar ref
+    atomically $ do
+      cache <- readTVar tvar
+      C.insertSTM key jsonTxt cache (Just expiryTimeSpec)
+  deleteStore (TimestampStore tvar) _prefix key = do
+    cache <- readTVarIO tvar
     C.delete cache key
 
 -- | Instance for storing Int counters for FixedWindow
 instance CacheStore (InMemoryStore 'FixedWindow) Int IO where
-  readStore (CounterStore ref) _prefix key = do
-    cache <- atomically $ readTVar ref
+  readStore (CounterStore tvar) _prefix key = do
+    cache <- readTVarIO tvar
     mval <- C.lookup cache key
     case mval of
       Nothing -> return Nothing
       Just txt -> return $ decodeStrict (encodeUtf8 txt)
-  writeStore (CounterStore ref) _prefix key val expiresIn = do
-    cache <- atomically $ readTVar ref
+  writeStore (CounterStore tvar) _prefix key val expiresIn = do
     let bs = encode val
         strictBs = LBS.toStrict bs
         jsonTxt = case decodeUtf8' strictBs of
                     Left _ -> ""
                     Right txt -> txt
     expiryTimeSpec <- secondsToTimeSpec expiresIn
-    atomically $ C.insertSTM key jsonTxt cache (Just expiryTimeSpec)
-  deleteStore (CounterStore ref) _prefix key = do
-    cache <- atomically $ readTVar ref
+    atomically $ do
+      cache <- readTVar tvar
+      C.insertSTM key jsonTxt cache (Just expiryTimeSpec)
+  deleteStore (CounterStore tvar) _prefix key = do
+    cache <- readTVarIO tvar
     C.delete cache key
 
 -- | Instance for storing Text values for TokenBucket
 instance CacheStore (InMemoryStore 'TokenBucket) Text IO where
-  readStore (TokenBucketStore ref) _prefix key = do
-    cache <- atomically $ readTVar ref
+  readStore (TokenBucketStore tvar) _prefix key = do
+    cache <- readTVarIO tvar
     C.lookup cache key
-  writeStore (TokenBucketStore ref) _prefix key val expiresIn = do
-    cache <- atomically $ readTVar ref
+  writeStore (TokenBucketStore tvar) _prefix key val expiresIn = do
     expiryTimeSpec <- secondsToTimeSpec expiresIn
-    atomically $ C.insertSTM key val cache (Just expiryTimeSpec)
-  deleteStore (TokenBucketStore ref) _prefix key = do
-    cache <- atomically $ readTVar ref
+    atomically $ do
+      cache <- readTVar tvar
+      C.insertSTM key val cache (Just expiryTimeSpec)
+  deleteStore (TokenBucketStore tvar) _prefix key = do
+    cache <- readTVarIO tvar
     C.delete cache key
 
 -- | Instance for storing LeakyBucketState for LeakyBucket
 instance CacheStore (InMemoryStore 'LeakyBucket) LeakyBucketState IO where
-  readStore (LeakyBucketStore ref) _prefix key = do
-    cache <- atomically $ readTVar ref
+  readStore (LeakyBucketStore tvar) _prefix key = do
+    cache <- readTVarIO tvar
     mval <- C.lookup cache key
     case mval of
       Nothing -> return Nothing
       Just txt -> return $ decodeStrict (encodeUtf8 txt)
-  writeStore (LeakyBucketStore ref) _prefix key val expiresIn = do
-    cache <- atomically $ readTVar ref
+  writeStore (LeakyBucketStore tvar) _prefix key val expiresIn = do
     let bs = encode val
         strictBs = LBS.toStrict bs
         jsonTxt = case decodeUtf8' strictBs of
                     Left _ -> ""
                     Right txt -> txt
     expiryTimeSpec <- secondsToTimeSpec expiresIn
-    atomically $ C.insertSTM key jsonTxt cache (Just expiryTimeSpec)
-  deleteStore (LeakyBucketStore ref) _prefix key = do
-    cache <- atomically $ readTVar ref
+    atomically $ do
+      cache <- readTVar tvar
+      C.insertSTM key jsonTxt cache (Just expiryTimeSpec)
+  deleteStore (LeakyBucketStore tvar) _prefix key = do
+    cache <- readTVarIO tvar
     C.delete cache key
 
 -- | Instance for TinyLRU cache
@@ -291,20 +309,18 @@ instance CacheStore (InMemoryStore 'TinyLRU) Int IO where
       cache <- readTVar ref
       TinyLRU.deleteKey key cache
 
+-- | Helper function to reset a TVar-based store with a new cache.
+resetStoreWith :: TVar (C.Cache Text Text) -> IO ()
+resetStoreWith tvar = do
+  newCache <- C.newCache Nothing
+  atomically $ writeTVar tvar newCache
+
 -- | ResettableStore instance for all InMemoryStore types
 instance ResettableStore (InMemoryStore a) where
-  resetStore (CounterStore ref) = do
-    newCache <- C.newCache Nothing
-    atomically $ writeTVar ref newCache
-  resetStore (TimestampStore ref) = do
-    newCache <- C.newCache Nothing
-    atomically $ writeTVar ref newCache
-  resetStore (TokenBucketStore ref) = do
-    newCache <- C.newCache Nothing
-    atomically $ writeTVar ref newCache
-  resetStore (LeakyBucketStore ref) = do
-    newCache <- C.newCache Nothing
-    atomically $ writeTVar ref newCache
+  resetStore (CounterStore tvar) = resetStoreWith tvar
+  resetStore (TimestampStore tvar) = resetStoreWith tvar
+  resetStore (TokenBucketStore tvar) = resetStoreWith tvar
+  resetStore (LeakyBucketStore tvar) = resetStoreWith tvar
   resetStore (TinyLRUStore ref) = atomically $ do
     cache <- readTVar ref
     TinyLRU.resetTinyLRU cache
