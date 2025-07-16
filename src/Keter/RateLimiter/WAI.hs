@@ -126,7 +126,8 @@ checkWithZone env throttleName throttleCfg req = do
     Nothing -> return (False, env)
     Just userKey -> do
       let config = envConfig env
-      ipZone <- getClientIP req
+      -- FIXED: Use the configured function to get the IP zone, not a hardcoded call.
+      let ipZone = configGetRequestIPZone config req
       cachesMap <- readIORef (envZoneCachesMap env)
       zoneCaches <- case Map.lookup ipZone cachesMap of
         Just caches -> return caches

@@ -24,6 +24,14 @@ import GHC.Generics (Generic)
 import Keter.RateLimiter.Cache
 import Data.Maybe (fromMaybe)
 
+-- | Minimum TTL in seconds to prevent abuse in web applications
+-- Set to 2 seconds as this is appropriate for HTTP-based rate limiting:
+-- - Prevents cache thrashing from very short TTLs
+-- - Still allows reasonable rate limiting for web requests
+-- - Most legitimate web usage patterns don't need sub-2-second windows
+minTTL :: Int
+minTTL = 2
+
 -- | Attempt to allow a request based on the token bucket algorithm.
 allowRequest
   :: MonadIO m
@@ -35,19 +43,23 @@ allowRequest
   -> Int          -- ^ Expires in (seconds)
   -> m Bool
 allowRequest cache ipZone userKey capacity refillRate expiresIn = liftIO $ do
-  now <- floor <$> getPOSIXTime
-  mState <- readCacheWithZone cache ipZone userKey
-  let state = fromMaybe (TokenBucketState capacity now) mState
-      refilledState = refill state now
-  if tokens refilledState > 0
-    then do
-      let newState = refilledState { tokens = tokens refilledState - 1 }
-      writeCacheWithZone cache ipZone userKey newState expiresIn
-      return True
+  -- Validate TTL against minimum required value
+  if expiresIn < minTTL
+    then return False  -- Block request due to invalid TTL
     else do
-      -- No tokens, but we still need to write back the refilled state
-      writeCacheWithZone cache ipZone userKey refilledState expiresIn
-      return False
+      now <- floor <$> getPOSIXTime
+      mState <- readCacheWithZone cache ipZone userKey
+      let state = fromMaybe (TokenBucketState capacity now) mState
+          refilledState = refill state now
+      if tokens refilledState > 0
+        then do
+          let newState = refilledState { tokens = tokens refilledState - 1 }
+          writeCacheWithZone cache ipZone userKey newState expiresIn
+          return True
+        else do
+          -- No tokens, but we still need to write back the refilled state
+          writeCacheWithZone cache ipZone userKey refilledState expiresIn
+          return False
   where
     refill :: TokenBucketState -> Int -> TokenBucketState
     refill (TokenBucketState oldTokens lastTime) nowTime =

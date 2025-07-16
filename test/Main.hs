@@ -122,10 +122,10 @@ tests = testGroup "Rate Limiter and IP Zones Tests"
   , Keter.RateLimiter.IPZonesTests.tests
   , Keter.RateLimiter.LeakyBucketStateTests.tests
   , Keter.RateLimiter.LeakyBucketTests.tests
-  , Keter.RateLimiter.NotificationTests.tests
   , Keter.RateLimiter.SlidingWindowTests.tests
   , Keter.RateLimiter.TokenBucketTests.tests
   , Keter.RateLimiter.WAITests.tests
+  , Keter.RateLimiter.NotificationTests.tests
   ]
 
 -- Rate Limiter Tests
