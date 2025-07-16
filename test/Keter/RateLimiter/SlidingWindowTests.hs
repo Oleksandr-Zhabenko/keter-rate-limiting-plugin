@@ -1,62 +1,239 @@
-{-# LANGUAGE OverloadedStrings, TypeApplications, DataKinds #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE DataKinds #-}
 
 module Keter.RateLimiter.SlidingWindowTests (tests) where
 
 import Test.Tasty
 import Test.Tasty.HUnit
+import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as T
-import Keter.RateLimiter.SlidingWindow
+import qualified Data.Text.Encoding as TE
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as LBS
+import Control.Monad (replicateM_)
+import Control.Concurrent (threadDelay, forkIO)
+import Control.Concurrent.MVar (newMVar, modifyMVar_, withMVar, MVar)
+import Network.Wai (Request, Application, defaultRequest, requestHeaders, responseLBS, remoteHost)
+import Network.Wai.Test (runSession, srequest, SRequest(..), SResponse, assertStatus, simpleStatus)
+import Network.HTTP.Types (methodGet, status200, status429)
+import Network.HTTP.Types.Status (statusCode)
+import Network.Socket (SockAddr(..), tupleToHostAddress)
 import Keter.RateLimiter.Cache
+import Keter.RateLimiter.WAI
+import Keter.RateLimiter.SlidingWindow (allowRequest)
+import Keter.RateLimiter.RequestUtils
 import Control.Monad.IO.Class (liftIO)
+import Data.CaseInsensitive (CI, mk)
 
+-- Helper functions to create requests
+mkIPv4Request :: Request
+mkIPv4Request = defaultRequest { remoteHost = SockAddrInet 0 (tupleToHostAddress (127, 0, 0, 1)) } -- 127.0.0.1
+
+mkIPv6Request :: Request
+mkIPv6Request = defaultRequest { remoteHost = SockAddrInet6 0 0 (0, 0, 0, 1) 0 } -- ::1
+
+mkRequestWithXFF :: Text -> Request
+mkRequestWithXFF ip = defaultRequest { requestHeaders = [(mk "x-forwarded-for", TE.encodeUtf8 ip)] }
+
+mkRequestWithRealIP :: Text -> Request
+mkRequestWithRealIP ip = defaultRequest { requestHeaders = [(mk "x-real-ip", TE.encodeUtf8 ip)] }
+
+-- Mock application that always returns 200 OK
+mockApp :: Application
+mockApp _ respond = respond $ responseLBS status200 [] (LBS.fromStrict $ TE.encodeUtf8 "OK")
+
+-- Test suite
 tests :: TestTree
-tests = testGroup "Keter.RateLimiter.SlidingWindow Tests"
-  [ testCase "allowRequest allows request under limit for IPv4" $ do
-      store <- createInMemoryStore @'SlidingWindow
-      let cache = newCache SlidingWindow store
-      result <- allowRequest cache "192.168.1.100:user123" 5 60
-      readResult <- readCacheWithZone cache "192.168.1.100" "user123" :: IO (Maybe [Int])
-      assertBool "allowRequest should allow under limit" result
-      assertEqual "readCacheWithZone should return one timestamp" (Just [54684]) readResult
-  , testCase "allowRequest allows request under limit for IPv6" $ do
-      store <- createInMemoryStore @'SlidingWindow
-      let cache = newCache SlidingWindow store
-      result <- allowRequest cache "2001:0db8:0000:0000:0000:0000:0000:0001:user123" 5 60
-      readResult <- readCacheWithZone cache "2001:0db8:0000:0000:0000:0000:0000:0001" "user123" :: IO (Maybe [Int])
-      assertBool "allowRequest should allow under limit" result
-      assertEqual "readCacheWithZone should return one timestamp" (Just [54684]) readResult
-  , testCase "allowRequest denies request over limit for IPv4" $ do
-      store <- createInMemoryStore @'SlidingWindow
-      let cache = newCache SlidingWindow store
-      _ <- writeCacheWithZone cache "192.168.1.100" "user123" [53684, 54184, 54484, 54584, 54684] 60
-      result <- allowRequest cache "192.168.1.100:user123" 5 60
-      assertEqual "allowRequest should deny over limit" False result
-  , testCase "allowRequest denies request over limit for IPv6" $ do
-      store <- createInMemoryStore @'SlidingWindow
-      let cache = newCache SlidingWindow store
-      _ <- writeCacheWithZone cache "2001:0db8:0000:0000:0000:0000:0000:0001" "user123" [53684, 54184, 54484, 54584, 54684] 60
-      result <- allowRequest cache "2001:0db8:0000:0000:0000:0000:0000:0001:user123" 5 60
-      assertEqual "allowRequest should deny over limit" False result
-  , testCase "allowRequest removes expired timestamps for IPv4" $ do
-      store <- createInMemoryStore @'SlidingWindow
-      let cache = newCache SlidingWindow store
-      _ <- writeCacheWithZone cache "192.168.1.100" "user123" [50684, 51684] 60
-      _ <- allowRequest cache "192.168.1.100:user123" 5 60
-      readResult <- readCacheWithZone cache "192.168.1.100" "user123" :: IO (Maybe [Int])
-      assertEqual "readCacheWithZone should return only current timestamp" (Just [54684]) readResult
-  , testCase "allowRequest removes expired timestamps for IPv6" $ do
-      store <- createInMemoryStore @'SlidingWindow
-      let cache = newCache SlidingWindow store
-      _ <- writeCacheWithZone cache "2001:0db8:0000:0000:0000:0000:0000:0001" "user123" [50684, 51684] 60
-      _ <- allowRequest cache "2001:0db8:0000:0000:0000:0000:0000:0001:user123" 5 60
-      readResult <- readCacheWithZone cache "2001:0db8:0000:0000:0000:0000:0000:0001" "user123" :: IO (Maybe [Int])
-      assertEqual "readCacheWithZone should return only current timestamp" (Just [54684]) readResult
-  , testCase "allowRequest handles empty cache for non-IP address" $ do
-      store <- createInMemoryStore @'SlidingWindow
-      let cache = newCache SlidingWindow store
-      result <- allowRequest cache "unknown:user123" 5 60
-      readResult <- readCacheWithZone cache "unknown" "user123" :: IO (Maybe [Int])
-      assertBool "allowRequest should allow under limit" result
-      assertEqual "readCacheWithZone should return one timestamp" (Just [54684]) readResult
+tests = testGroup "Sliding Window Tests"
+  [ testCase "Allows IPv4 requests below limit" $ do
+      env <- initConfig (const defaultIPZone)
+      let throttle = ThrottleConfig
+            { throttleLimit = 2
+            , throttlePeriod = 60
+            , throttleAlgorithm = SlidingWindow
+            , throttleIdentifier = byIP
+            , throttleTokenBucketTTL = Nothing
+            }
+      let env' = addThrottle env (T.pack "test_throttle") throttle
+      let app = attackMiddleware env' mockApp
+      let session = do
+            result1 <- srequest $ SRequest mkIPv4Request LBS.empty
+            assertStatus 200 result1
+            result2 <- srequest $ SRequest mkIPv4Request LBS.empty
+            assertStatus 200 result2
+      runSession session app
+  , testCase "Blocks IPv4 requests exceeding limit" $ do
+      env <- initConfig (const defaultIPZone)
+      let throttle = ThrottleConfig
+            { throttleLimit = 2
+            , throttlePeriod = 60
+            , throttleAlgorithm = SlidingWindow
+            , throttleIdentifier = byIP
+            , throttleTokenBucketTTL = Nothing
+            }
+      let env' = addThrottle env (T.pack "test_throttle") throttle
+      let app = attackMiddleware env' mockApp
+      let session = do
+            result1 <- srequest $ SRequest mkIPv4Request LBS.empty
+            assertStatus 200 result1
+            result2 <- srequest $ SRequest mkIPv4Request LBS.empty
+            assertStatus 200 result2
+            result3 <- srequest $ SRequest mkIPv4Request LBS.empty
+            assertStatus 429 result3
+      runSession session app
+  , testCase "Allows IPv6 requests below limit" $ do
+      env <- initConfig (const defaultIPZone)
+      let throttle = ThrottleConfig
+            { throttleLimit = 2
+            , throttlePeriod = 60
+            , throttleAlgorithm = SlidingWindow
+            , throttleIdentifier = byIP
+            , throttleTokenBucketTTL = Nothing
+            }
+      let env' = addThrottle env (T.pack "test_throttle") throttle
+      let app = attackMiddleware env' mockApp
+      let session = do
+            result1 <- srequest $ SRequest mkIPv6Request LBS.empty
+            assertStatus 200 result1
+            result2 <- srequest $ SRequest mkIPv6Request LBS.empty
+            assertStatus 200 result2
+      runSession session app
+  , testCase "Blocks IPv6 requests exceeding limit" $ do
+      env <- initConfig (const defaultIPZone)
+      let throttle = ThrottleConfig
+            { throttleLimit = 2
+            , throttlePeriod = 60
+            , throttleAlgorithm = SlidingWindow
+            , throttleIdentifier = byIP
+            , throttleTokenBucketTTL = Nothing
+            }
+      let env' = addThrottle env (T.pack "test_throttle") throttle
+      let app = attackMiddleware env' mockApp
+      let session = do
+            result1 <- srequest $ SRequest mkIPv6Request LBS.empty
+            assertStatus 200 result1
+            result2 <- srequest $ SRequest mkIPv6Request LBS.empty
+            assertStatus 200 result2
+            result3 <- srequest $ SRequest mkIPv6Request LBS.empty
+            assertStatus 429 result3
+      runSession session app
+  , testCase "Respects sliding window timing with IPv4" $ do
+      env <- initConfig (const defaultIPZone)
+      let throttle = ThrottleConfig
+            { throttleLimit = 2
+            , throttlePeriod = 2
+            , throttleAlgorithm = SlidingWindow
+            , throttleIdentifier = byIP
+            , throttleTokenBucketTTL = Nothing
+            }
+      let env' = addThrottle env (T.pack "test_throttle") throttle
+      let app = attackMiddleware env' mockApp
+      let session = do
+            result1 <- srequest $ SRequest mkIPv4Request LBS.empty
+            assertStatus 200 result1
+            result2 <- srequest $ SRequest mkIPv4Request LBS.empty
+            assertStatus 200 result2
+            result3 <- srequest $ SRequest mkIPv4Request LBS.empty
+            assertStatus 429 result3
+            liftIO $ threadDelay (3 * 1000000) -- Wait for window reset
+            result4 <- srequest $ SRequest mkIPv4Request LBS.empty
+            assertStatus 200 result4
+      runSession session app
+  , testCase "Handles x-forwarded-for header for IPv4" $ do
+      env <- initConfig (const defaultIPZone)
+      let throttle = ThrottleConfig
+            { throttleLimit = 2
+            , throttlePeriod = 60
+            , throttleAlgorithm = SlidingWindow
+            , throttleIdentifier = byIP
+            , throttleTokenBucketTTL = Nothing
+            }
+      let env' = addThrottle env (T.pack "test_throttle") throttle
+      let app = attackMiddleware env' mockApp
+      let req = mkRequestWithXFF (T.pack "192.168.1.1")
+      let session = do
+            result1 <- srequest $ SRequest req LBS.empty
+            assertStatus 200 result1
+            result2 <- srequest $ SRequest req LBS.empty
+            assertStatus 200 result2
+            result3 <- srequest $ SRequest req LBS.empty
+            assertStatus 429 result3
+      runSession session app
+  , testCase "Handles x-real-ip header for IPv6" $ do
+      env <- initConfig (const defaultIPZone)
+      let throttle = ThrottleConfig
+            { throttleLimit = 2
+            , throttlePeriod = 60
+            , throttleAlgorithm = SlidingWindow
+            , throttleIdentifier = byIP
+            , throttleTokenBucketTTL = Nothing
+            }
+      let env' = addThrottle env (T.pack "test_throttle") throttle
+      let app = attackMiddleware env' mockApp
+      let req = mkRequestWithRealIP (T.pack "2001:db8::1")
+      let session = do
+            result1 <- srequest $ SRequest req LBS.empty
+            assertStatus 200 result1
+            result2 <- srequest $ SRequest req LBS.empty
+            assertStatus 200 result2
+            result3 <- srequest $ SRequest req LBS.empty
+            assertStatus 429 result3
+      runSession session app
+  , testCase "Handles concurrent requests" $ do
+      env <- initConfig (const defaultIPZone)
+      let throttle = ThrottleConfig
+            { throttleLimit = 2
+            , throttlePeriod = 60
+            , throttleAlgorithm = SlidingWindow
+            , throttleIdentifier = byIP
+            , throttleTokenBucketTTL = Nothing
+            }
+      let env' = addThrottle env (T.pack "test_throttle") throttle
+      let app = attackMiddleware env' mockApp
+      mvar <- newMVar []
+      let runRequest = do
+            result <- srequest $ SRequest mkIPv4Request LBS.empty
+            return $ statusCode $ simpleStatus result
+      -- Fork three concurrent requests
+      _ <- forkIO $ do
+        status <- runSession runRequest app
+        modifyMVar_ mvar $ \results -> return (status : results)
+      _ <- forkIO $ do
+        status <- runSession runRequest app
+        modifyMVar_ mvar $ \results -> return (status : results)
+      _ <- forkIO $ do
+        status <- runSession runRequest app
+        modifyMVar_ mvar $ \results -> return (status : results)
+      threadDelay (3 * 1000000) -- Increased delay to ensure threads complete
+      results <- withMVar mvar return
+      let successes = length $ filter (== 200) results
+          failures = length $ filter (== 429) results
+      assertEqual "Exactly two requests should succeed" 2 successes
+      assertEqual "One request should fail" 1 failures
+  , testCase "Handles DoS-like concurrency" $ do
+      env <- initConfig (const defaultIPZone)
+      let throttle = ThrottleConfig
+            { throttleLimit = 2
+            , throttlePeriod = 60
+            , throttleAlgorithm = SlidingWindow
+            , throttleIdentifier = byIP
+            , throttleTokenBucketTTL = Nothing
+            }
+      let env' = addThrottle env (T.pack "test_throttle") throttle
+      let app = attackMiddleware env' mockApp
+      mvar <- newMVar []
+      let runRequest = do
+            result <- srequest $ SRequest mkIPv4Request LBS.empty
+            return $ statusCode $ simpleStatus result
+      -- Fork 100 concurrent requests
+      replicateM_ 100 $ forkIO $ do
+        status <- runSession runRequest app
+        modifyMVar_ mvar $ \results -> return (status : results)
+      threadDelay (3 * 1000000) -- Wait for threads to complete
+      results <- withMVar mvar return
+      let successes = length $ filter (== 200) results
+          failures = length $ filter (== 429) results
+      assertEqual "Exactly two requests should succeed" 2 successes
+      assertBool "Most requests should fail" (failures >= 98)
   ]

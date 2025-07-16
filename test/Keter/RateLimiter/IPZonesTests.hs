@@ -4,23 +4,18 @@ module Keter.RateLimiter.IPZonesTests (tests) where
 
 import Test.Tasty
 import Test.Tasty.HUnit
-import Network.Socket (SockAddr(..))
+import Network.Socket (SockAddr(..), tupleToHostAddress)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Keter.RateLimiter.IPZones
 import Keter.RateLimiter.Cache
 import Control.Monad.IO.Class (liftIO)
 import Control.Concurrent (threadDelay)
-import Data.Bits (shiftL, (.|.))
-import Data.Word (Word32, Word8)
-
-toHostAddress :: Word8 -> Word8 -> Word8 -> Word8 -> Word32
-toHostAddress a b c d = (fromIntegral a `shiftL` 24) .|. (fromIntegral b `shiftL` 16) .|. (fromIntegral c `shiftL` 8) .|. fromIntegral d
 
 tests :: TestTree
 tests = testGroup "Keter.RateLimiter.IPZones Tests"
   [ testCase "sockAddrToIPZone produces correct IPv4 address" $ do
-      let addr = SockAddrInet 0 (toHostAddress 192 168 1 100)
+      let addr = SockAddrInet 0 (tupleToHostAddress (192, 168, 1, 100))
       result <- sockAddrToIPZone addr
       assertEqual "IPv4 address should be correct" "192.168.1.100" result
   , testCase "sockAddrToIPZone produces correct IPv6 address" $ do

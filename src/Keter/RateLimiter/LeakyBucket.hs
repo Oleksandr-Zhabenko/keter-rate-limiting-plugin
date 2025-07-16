@@ -1,83 +1,89 @@
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE DeriveGeneric #-}
-
-{-|
-Module      : Keter.RateLimiter.LeakyBucket
-Description : Leaky bucket rate limiting algorithm implementation
-Copyright   : (c) 2025 Oleksandr Zhabenko
-License     : MIT
-Maintainer  : oleksandr.zhabenko@yahoo.com
-Stability   : stable
-Portability : portable
-
-This module implements the leaky bucket rate limiting algorithm using a cache-backed state.
-
-== Overview
-
-The leaky bucket algorithm controls the rate of requests by simulating a bucket that leaks at a constant rate.
-Requests add to the bucket's level, and if the level exceeds the capacity, further requests are denied until the bucket leaks enough.
-
-This implementation stores the bucket state in a cache, allowing distributed or persistent rate limiting.
-
-== Key function
-
-- 'allowRequest' attempts to allow a request identified by a key.
-  It updates the bucket state accordingly and returns 'True' if the request is allowed, or 'False' otherwise.
-
-== Parameters of 'allowRequest'
-
-* Cache — the cache storing the leaky bucket states, tagged with the LeakyBucket algorithm.
-* Key — identifier for the bucket (e.g., user or IP).
-* Capacity — maximum bucket level (number of requests allowed before blocking).
-* Leak rate — the rate at which the bucket leaks (units per second).
-* TTL — time-to-live for the cache entry in seconds.
-
-== Behaviour
-
-When a request arrives, the bucket leaks according to the elapsed time since the last update.
-If the bucket level after leaking is below capacity, the request is allowed and the level increments.
-Otherwise, the request is denied, but the state is still updated in the cache.
-
--}
+{-# LANGUAGE NamedFieldPuns #-}
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE TypeApplications #-}
 
 module Keter.RateLimiter.LeakyBucket
   ( allowRequest
   ) where
 
+import Keter.RateLimiter.LeakyBucketState
 import Keter.RateLimiter.Cache
-import Keter.RateLimiter.LeakyBucketState (LeakyBucketState(..))
-import Data.Time.Clock.POSIX (getPOSIXTime)
 import Data.Text (Text)
+import Control.Concurrent (forkIO)
+import Control.Concurrent.STM
+import Control.Concurrent.STM.TQueue
+import qualified Focus                     as F
+import qualified StmContainers.Map         as StmMap
+import Data.Time.Clock.POSIX (getPOSIXTime)
+import Control.Concurrent.MVar
+import Control.Monad (void, when, forever)
+import qualified Data.Text as T
 
--- | Attempt to allow a request under the leaky bucket rate limiting algorithm.
-allowRequest
-  :: Cache (InMemoryStore 'LeakyBucket)
-  -> Text
-  -> Int
-  -> Double
-  -> Int
-  -> IO Bool
-allowRequest cache unprefixedKey capacity leakRate ttl = do
+type LeakyBucketMap = StmMap.Map Text (TVar LeakyBucketState, TQueue (MVar Bool))
+
+-- | Spawn a background worker for a given user key to handle requests sequentially.
+startWorker
+  :: TVar LeakyBucketState
+  -> TQueue (MVar Bool)
+  -> Int       -- ^ Capacity
+  -> Int       -- ^ Leak rate
+  -> IO ()
+startWorker stateVar queue capacity leakRate = void . forkIO $ forever $ do
+  replyVar <- atomically $ readTQueue queue
   now <- floor <$> getPOSIXTime
-  let key = makeCacheKey (cacheAlgorithm cache) "" unprefixedKey
-  mstate <- readStore (cacheStore cache) (algorithmPrefix $ cacheAlgorithm cache) key
+  result <- atomically $ do
+    LeakyBucketState{level, lastTime} <- readTVar stateVar
+    let elapsed     = fromIntegral (now - lastTime) :: Double
+        leakedLevel = max 0 (level - elapsed * fromIntegral leakRate)
+        nextLevel   = leakedLevel + 1
+        newState    = LeakyBucketState
+          { level = if nextLevel > fromIntegral capacity then leakedLevel else nextLevel
+          , lastTime = now
+          }
+        allowed = nextLevel <= fromIntegral capacity
+    writeTVar stateVar newState
+    return allowed
+  putMVar replyVar result
 
-  let state = case mstate of
-        Nothing -> LeakyBucketState 0 now
-        Just s  -> leak s now
+-- | Request permission under leaky bucket, per IP zone and user key.
+allowRequest
+  :: Cache LeakyBucketCacheStore
+  -> Text              -- ^ IP-zone
+  -> Text              -- ^ user key
+  -> Int               -- ^ capacity
+  -> Int               -- ^ leak rate
+  -> IO Bool
+allowRequest (Cache _ (LeakyBucketCacheStore mapVar))
+             ipZone userKey capacity leakRate = do
+  let fullKey = makeCacheKey LeakyBucket ipZone userKey
+  replyVar <- newEmptyMVar
+  now      <- floor <$> getPOSIXTime
 
-  if level state < fromIntegral capacity
-    then do
-      let newState = state { level = level state + 1 }
-      writeStore (cacheStore cache) (algorithmPrefix $ cacheAlgorithm cache) key newState ttl
-      return True
-    else do
-      writeStore (cacheStore cache) (algorithmPrefix $ cacheAlgorithm cache) key state ttl
-      return False
-  where
-    leak :: LeakyBucketState -> Int -> LeakyBucketState
-    leak (LeakyBucketState oldLevel lastTime) nowTime =
-      let delta = fromIntegral (nowTime - lastTime) :: Double
-          leaked = delta * leakRate
-          newLevel = max 0 (oldLevel - leaked)
-      in LeakyBucketState newLevel nowTime
+  -- Use Focus to get or create the bucket pair, tracking if it was newly created
+  wasNew <- atomically $ 
+    StmMap.focus (F.casesM
+        -- Case: bucket doesn't exist, create new one
+        (do
+          stateVar <- newTVar $ LeakyBucketState 0 now
+          queue    <- newTQueue
+          writeTQueue queue replyVar
+          pure (True, F.Set (stateVar, queue))
+        )
+        -- Case: bucket exists, use existing one
+        (\(stateVar, queue) -> do
+          writeTQueue queue replyVar
+          pure (False, F.Leave)
+        )
+      ) fullKey mapVar
+
+  -- If bucket was newly created, start worker
+  when wasNew $ do
+    -- Get the bucket pair from the map since we just created it
+    maybeBucketPair <- atomically $ StmMap.lookup fullKey mapVar
+    case maybeBucketPair of
+      Just (stateVar, queue) -> startWorker stateVar queue capacity leakRate
+      Nothing -> error "Race condition: bucket should exist after creation"
+
+  takeMVar replyVar

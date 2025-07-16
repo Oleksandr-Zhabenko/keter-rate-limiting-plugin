@@ -17,9 +17,10 @@ import Network.Wai (Request, Application, defaultRequest, requestHeaders, respon
 import Network.Wai.Test (runSession, srequest, SRequest(..), SResponse, assertStatus, simpleStatus)
 import Network.HTTP.Types (methodGet, status200, status429)
 import Network.HTTP.Types.Status (statusCode)
-import Network.Socket (SockAddr(..))
+import Network.Socket (SockAddr(..), tupleToHostAddress)
 import Keter.RateLimiter.Cache
 import Keter.RateLimiter.WAI
+import Keter.RateLimiter.RequestUtils
 import Keter.RateLimiter.TokenBucket (allowRequest)
 import Control.Monad.IO.Class (liftIO)
 import Network.Wai (remoteHost)
@@ -27,7 +28,7 @@ import Data.CaseInsensitive (CI, mk)
 
 -- Helper functions to create requests
 mkIPv4Request :: Request
-mkIPv4Request = defaultRequest { remoteHost = SockAddrInet 0 16777343 } -- 127.0.0.1
+mkIPv4Request = defaultRequest { remoteHost = SockAddrInet 0 (tupleToHostAddress (127, 0, 0, 1)) } -- 127.0.0.1
 
 mkIPv6Request :: Request
 mkIPv6Request = defaultRequest { remoteHost = SockAddrInet6 0 0 (0, 0, 0, 1) 0 } -- ::1

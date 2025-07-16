@@ -9,8 +9,8 @@ module Main where
 
 import Control.Concurrent.STM (atomically, readTVar)
 import Control.Concurrent (threadDelay)
-import Control.Monad (when)
 import Control.Exception (try, SomeException)
+import Control.Monad (when)
 import Data.Maybe (isJust)
 import Data.IORef (readIORef, newIORef, writeIORef, IORef)
 import Data.Cache (purgeExpired)
@@ -30,12 +30,14 @@ import Keter.RateLimiter.Cache
 import Keter.RateLimiter.IPZones (IPZoneIdentifier(..), defaultIPZone, zscCounterCache)
 import Keter.RateLimiter.WAI
   ( Env, ZoneSpecificCaches(..), ThrottleConfig(..), initConfig, addThrottle, 
-    instrument, getClientIP, getRequestPath, defaultIPZone, envZoneCachesMap, cacheResetAll )
+    instrument, defaultIPZone, envZoneCachesMap, cacheResetAll )
+import Keter.RateLimiter.RequestUtils
+import System.IO.Unsafe (unsafePerformIO)
 import TinyLRUTests (tests)
 import Keter.RateLimiter.Cache.PurgeTests
 import Keter.RateLimiter.IPZonesTests
 import Keter.RateLimiter.LeakyBucketStateTests
--- import Keter.RateLimiter.LeakyBucketTests
+import Keter.RateLimiter.LeakyBucketTests
 import Keter.RateLimiter.NotificationTests
 import Keter.RateLimiter.SlidingWindowTests
 import Keter.RateLimiter.TokenBucketTests
@@ -54,13 +56,15 @@ genericTestIP2 = "192.168.1.2"
 
 -- Helper function to extract IP from WAI Request for zone determination
 testGetRequestIPZone :: Request -> IPZoneIdentifier
-testGetRequestIPZone req
-  | getClientIP req == ipForZoneA = testIPZoneA
-  | getClientIP req == ipForZoneB = testIPZoneB
-  | getClientIP req == genericTestIP = defaultIPZone
-  | getClientIP req == genericTestIP2 = defaultIPZone
-  | getClientIP req == ipForDefaultZone = defaultIPZone
-  | otherwise = defaultIPZone
+testGetRequestIPZone req =
+  let ip = unsafePerformIO $ getClientIP req
+  in case ip of
+    _ | ip == ipForZoneA -> testIPZoneA
+      | ip == ipForZoneB -> testIPZoneB
+      | ip == genericTestIP -> defaultIPZone
+      | ip == genericTestIP2 -> defaultIPZone
+      | ip == ipForDefaultZone -> defaultIPZone
+      | otherwise -> defaultIPZone
 
 -- Helper to create a mock WAI Request with specified IP and path
 makeRequest :: Text -> Text -> Request
@@ -111,13 +115,13 @@ main = do
 tests :: TestTree
 tests = testGroup "Rate Limiter and IP Zones Tests"
   [ TinyLRUTests.tests -- From TinyLRUTests.hs
+  , testBackgroundPurge -- For testing of the background purging of the expired keys to prevent memory leakage conditions
   , rateLimiterTests
   , ipZoneTests
   , cacheApiTests
-  , testBackgroundPurge -- For testing of the background purging of the expired keys to prevent memory leakage conditions
   , Keter.RateLimiter.IPZonesTests.tests
   , Keter.RateLimiter.LeakyBucketStateTests.tests
---  , Keter.RateLimiter.LeakyBucketTests.tests
+  , Keter.RateLimiter.LeakyBucketTests.tests
   , Keter.RateLimiter.NotificationTests.tests
   , Keter.RateLimiter.SlidingWindowTests.tests
   , Keter.RateLimiter.TokenBucketTests.tests
@@ -144,7 +148,7 @@ testFixedWindow = do
         { throttleLimit = 3
         , throttlePeriod = 10
         , throttleAlgorithm = FixedWindow
-        , throttleIdentifier = Just . getClientIP
+        , throttleIdentifier = Just . (\req -> unsafePerformIO $ getClientIP req)
         , throttleTokenBucketTTL = Nothing
         }
       envWithThrottle = addThrottle env "test-throttle" throttleConfig
@@ -159,7 +163,7 @@ testSlidingWindow = do
         { throttleLimit = 3
         , throttlePeriod = 10
         , throttleAlgorithm = SlidingWindow
-        , throttleIdentifier = Just . getClientIP
+        , throttleIdentifier = Just . (\req -> unsafePerformIO $ getClientIP req)
         , throttleTokenBucketTTL = Nothing
         }
       envWithThrottle = addThrottle env "test-throttle" throttleConfig
@@ -175,7 +179,7 @@ testTokenBucket = do
         { throttleLimit = 3
         , throttlePeriod = 1
         , throttleAlgorithm = TokenBucket
-        , throttleIdentifier = Just . getClientIP
+        , throttleIdentifier = Just . (\req -> unsafePerformIO $ getClientIP req)
         , throttleTokenBucketTTL = Just ttlSeconds
         }
       envWithThrottle = addThrottle env "test-throttle" throttleConfig
@@ -197,7 +201,7 @@ testLeakyBucket = do
         { throttleLimit = 3
         , throttlePeriod = 10
         , throttleAlgorithm = LeakyBucket
-        , throttleIdentifier = Just . getClientIP
+        , throttleIdentifier = Just . (\req -> unsafePerformIO $ getClientIP req)
         , throttleTokenBucketTTL = Nothing
         }
       envWithThrottle = addThrottle env "test-throttle" throttleConfig
@@ -217,7 +221,7 @@ testPathSpecificThrottle = do
         , throttleAlgorithm = FixedWindow
         , throttleIdentifier = \req ->
             if getRequestPath req == "/login"
-            then Just (getClientIP req <> ":" <> getRequestPath req)
+            then Just ((unsafePerformIO $ getClientIP req) <> ":" <> getRequestPath req)
             else Nothing
         , throttleTokenBucketTTL = Nothing
         }
@@ -236,7 +240,7 @@ testMultipleThrottles = do
         { throttleLimit = 5
         , throttlePeriod = 10
         , throttleAlgorithm = FixedWindow
-        , throttleIdentifier = Just . getClientIP
+        , throttleIdentifier = Just . (\req -> unsafePerformIO $ getClientIP req)
         , throttleTokenBucketTTL = Nothing
         }
       loginThrottleConfig = ThrottleConfig
@@ -245,7 +249,7 @@ testMultipleThrottles = do
         , throttleAlgorithm = SlidingWindow
         , throttleIdentifier = \req ->
             if getRequestPath req == "/login"
-            then Just (getClientIP req <> ":" <> getRequestPath req)
+            then Just ((unsafePerformIO $ getClientIP req) <> ":" <> getRequestPath req)
             else Nothing
         , throttleTokenBucketTTL = Nothing
         }
@@ -270,7 +274,7 @@ testOriginalResetAfterPeriod = do
         { throttleLimit = 2
         , throttlePeriod = 1
         , throttleAlgorithm = FixedWindow
-        , throttleIdentifier = Just . getClientIP
+        , throttleIdentifier = Just . (\req -> unsafePerformIO $ getClientIP req)
         , throttleTokenBucketTTL = Nothing
         }
       envWithThrottle1 = addThrottle env1 "test-throttle" throttleConfig
@@ -293,7 +297,7 @@ testTimeBasedReset = do
         { throttleLimit = limit
         , throttlePeriod = periodSec
         , throttleAlgorithm = FixedWindow
-        , throttleIdentifier = Just . getClientIP
+        , throttleIdentifier = Just . (\req -> unsafePerformIO $ getClientIP req)
         , throttleTokenBucketTTL = Nothing
         }
       envWithThrottle = addThrottle env "reset-throttle" throttleConfig
@@ -313,7 +317,7 @@ testTimeBasedReset = do
     Nothing -> assertFailure "Zone caches not found" >> return undefined
   let cache :: Cache (InMemoryStore 'FixedWindow)
       cache = zscCounterCache zoneCaches
-      key = makeCacheKey FixedWindow testIPZoneA (getClientIP req)
+      key = makeCacheKey FixedWindow testIPZoneA (unsafePerformIO $ getClientIP req)
   mVal <- readCache cache key :: IO (Maybe Int)
   when (isJust mVal) $ putStrLn $ "Cache value before third request: " ++ show mVal
   -- Try manually deleting if it exists
@@ -344,7 +348,7 @@ testIPZoneIsolation = do
         { throttleLimit = limit
         , throttlePeriod = period
         , throttleAlgorithm = FixedWindow
-        , throttleIdentifier = Just . getClientIP
+        , throttleIdentifier = Just . (\req -> unsafePerformIO $ getClientIP req)
         , throttleTokenBucketTTL = Nothing
         }
       envWithThrottle = addThrottle env "test-throttle" throttleConfig
@@ -364,7 +368,7 @@ testIPZoneDefaultFallback = do
         { throttleLimit = 1
         , throttlePeriod = 10
         , throttleAlgorithm = FixedWindow
-        , throttleIdentifier = Just . getClientIP
+        , throttleIdentifier = Just . (\req -> unsafePerformIO $ getClientIP req)
         , throttleTokenBucketTTL = Nothing
         }
       envWithThrottle = addThrottle env "test-throttle" throttleConfig
@@ -382,7 +386,7 @@ testIPZoneCacheResetAll = do
         { throttleLimit = 1
         , throttlePeriod = 10
         , throttleAlgorithm = FixedWindow
-        , throttleIdentifier = Just . getClientIP
+        , throttleIdentifier = Just . (\req -> unsafePerformIO $ getClientIP req)
         , throttleTokenBucketTTL = Nothing
         }
       envWithThrottle = addThrottle env "test-throttle" throttleConfig

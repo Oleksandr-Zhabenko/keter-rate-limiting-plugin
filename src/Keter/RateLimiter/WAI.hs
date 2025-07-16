@@ -1,6 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE TypeApplications #-}
 
 {-|
 Module      : Keter.RateLimiter.WAI
@@ -10,41 +11,6 @@ License     : MIT
 Maintainer  : oleksandr.zhabenko@yahoo.com
 Stability   : stable
 Portability : portable
-
-This file is a ported to Haskell language code with some simplifications of rack-attack 
-https://github.com/rack/rack-attack/blob/main/lib/rack/attack.rb
-and is based on the structure of the original code of 
-rack-attack, Copyright (c) 2016 by Kickstarter, PBC, under the MIT License.
-Oleksandr Zhabenko added several implementations of the window algorithm: sliding window, token bucket window, leaky bucket window alongside with the initial count algorithm using AI chatbots.
-IP Zone functionality added to allow separate caches per IP zone.
-
-This implementation is released under the MIT License.
-
-This module provides a rack-attack inspired rate limiting middleware with IP zone support.
-It allows convenient configuration with automatic key composition, but also supports full customisation
-for advanced users who wish to control key structure or throttling logic.
-
-WAI-compatible version of the rate limiter that works with standard WAI Request/Response types.
-
-== Features
-
-* Middleware integration via 'attackMiddleware'
-* Support for multiple algorithms selectable per throttle
-* Dynamic throttle configuration with 'addThrottle'
-* Per-IP-zone cache management
-* Notifications on rate limit events
-* Cache reset utilities
-* Convenient key management wrappers (recommended for most use cases)
-* Full customisability for advanced scenarios
-
-== Usage
-
-1. Initialise environment with 'initConfig', providing a function to extract IP zones from requests.
-2. Add throttles with 'addThrottle'.
-3. Use 'attackMiddleware' to enforce rate limiting.
-4. Use 'cacheResetAll' to clear caches if needed.
-5. For most use cases, use the convenient key wrappers; for advanced control, use the base functions and compose keys as you wish.
-
 -}
 
 module Keter.RateLimiter.WAI
@@ -60,45 +26,29 @@ module Keter.RateLimiter.WAI
   , IPZoneIdentifier
   , defaultIPZone
   , ZoneSpecificCaches
-  -- For convenience (re-exported from Cache)
-  , Algorithm(..)
-  , algorithmPrefix
-  , makeCacheKey
-  , incStoreWithZone
-  , readCacheWithZone
-  , writeCacheWithZone
-  , deleteCacheWithZone
-  -- WAI-specific helpers
-  , getClientIP
-  , getRequestPath
-  , getRequestMethod
-  , byIP
-  , byIPAndPath
-  , byIPAndUserAgent
-  , byHeaderAndIP
+  , simpleIPRateLimit
+  , apiRateLimit
   ) where
 
 import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
 import Data.Text (Text)
 import qualified Data.Text as T
-import qualified Data.Text.Encoding as TE
-import qualified Data.ByteString as B
-import qualified Data.ByteString.Char8 as B8
 import GHC.Generics (Generic)
 import Network.Wai (Request, Response, Middleware, ResponseReceived)
 import qualified Network.Wai as WAI
 import Network.HTTP.Types (Status, status429)
-import Network.HTTP.Types.Header (HeaderName)
-import Network.Socket (SockAddr(..))
+import Data.IP (fromHostAddress, fromHostAddress6)
+import Debug.Trace (traceM)
 import qualified Keter.RateLimiter.Notifications as Notifications
 import Keter.RateLimiter.IPZones (IPZoneIdentifier, defaultIPZone, ZoneSpecificCaches(..), newZoneSpecificCaches, resetSingleZoneCaches)
-import Keter.RateLimiter.Cache
-import qualified Keter.RateLimiter.SlidingWindow as SW
-import qualified Keter.RateLimiter.TokenBucket as TB
-import qualified Keter.RateLimiter.LeakyBucket as LB
+import Keter.RateLimiter.Cache (Cache(..), Algorithm(..), makeCacheKey, incStoreWithZone)
+import Keter.RateLimiter.SlidingWindow as SW (allowRequest)
+import Keter.RateLimiter.TokenBucket as TB (allowRequest)
+import Keter.RateLimiter.LeakyBucket as LB (allowRequest)
 import Data.IORef (IORef, newIORef, readIORef, modifyIORef')
 import Control.Monad (when)
+import Keter.RateLimiter.RequestUtils (getClientIP, getRequestPath, getRequestMethod, byIP, byIPAndPath, byIPAndUserAgent, byHeaderAndIP)
 
 -- | Environment holding configuration and caches per IP zone.
 data Env = Env
@@ -109,9 +59,9 @@ data Env = Env
 -- | Configuration for the rate limiter
 data Configuration = Configuration
   { configThrottles :: Map Text ThrottleConfig
-  , configNotifier :: Notifications.WAINotifier  -- Updated for WAI
+  , configNotifier :: Notifications.WAINotifier
   , configGetRequestIPZone :: Request -> IPZoneIdentifier
-  , configRateLimitResponse :: Request -> Response  -- Customizable response
+  , configRateLimitResponse :: Request -> Response
   }
 
 -- | For TokenBucket, use 'throttleTokenBucketTTL' to specify cache TTL (in seconds).
@@ -119,8 +69,8 @@ data ThrottleConfig = ThrottleConfig
   { throttleLimit :: Int
   , throttlePeriod :: Int
   , throttleAlgorithm :: Algorithm
-  , throttleIdentifier :: Request -> Maybe Text  -- Now takes WAI Request
-  , throttleTokenBucketTTL :: Maybe Int -- ^ Only used for TokenBucket, default: 7200 (2 hours)
+  , throttleIdentifier :: Request -> Maybe Text
+  , throttleTokenBucketTTL :: Maybe Int
   }
 
 -- | Default rate limit response (429 Too Many Requests)
@@ -138,7 +88,6 @@ defaultConfiguration = Configuration
   , configRateLimitResponse = defaultRateLimitResponse
   }
 
--- 1. Initialization of Env with IORef
 initConfig :: (Request -> IPZoneIdentifier) -> IO Env
 initConfig getIPZone = do
   let config = defaultConfiguration { configGetRequestIPZone = getIPZone }
@@ -150,7 +99,6 @@ addThrottle env name cfg =
   let newThrottles = Map.insert name cfg (configThrottles $ envConfig env)
   in env { envConfig = (envConfig env) { configThrottles = newThrottles } }
 
--- | WAI Middleware that applies rate limiting
 attackMiddleware :: Env -> Middleware
 attackMiddleware env app req respond = do
   blocked <- instrument env req
@@ -158,7 +106,6 @@ attackMiddleware env app req respond = do
     then respond (configRateLimitResponse (envConfig env) req)
     else app req respond
 
--- | Check if request should be blocked by rate limiting
 instrument :: Env -> Request -> IO Bool
 instrument initialEnv req = do
   let throttles = Map.toList (configThrottles $ envConfig initialEnv)
@@ -173,15 +120,13 @@ instrument initialEnv req = do
   (isBlocked, _) <- go False initialEnv throttles
   return isBlocked
 
--- | Check a single throttle against a request, updating caches and notifying if blocked.
---   Uses convenient key composition by default, but can be replaced for advanced scenarios.
 checkWithZone :: Env -> Text -> ThrottleConfig -> Request -> IO (Bool, Env)
-checkWithZone env throttleName throttleCfg req =
+checkWithZone env throttleName throttleCfg req = do
   case throttleIdentifier throttleCfg req of
     Nothing -> return (False, env)
     Just userKey -> do
       let config = envConfig env
-          ipZone = configGetRequestIPZone config req
+      ipZone <- getClientIP req
       cachesMap <- readIORef (envZoneCachesMap env)
       zoneCaches <- case Map.lookup ipZone cachesMap of
         Just caches -> return caches
@@ -190,39 +135,41 @@ checkWithZone env throttleName throttleCfg req =
           modifyIORef' (envZoneCachesMap env) (Map.insert ipZone newCaches)
           return newCaches
       let fullKey = makeCacheKey (throttleAlgorithm throttleCfg) ipZone userKey
+      traceM $ "Checking throttle: " ++ T.unpack throttleName ++ ", Key: " ++ T.unpack fullKey
       isBlocked <- case throttleAlgorithm throttleCfg of
         FixedWindow -> do
-          currentCount <- incStore (zscCounterCache zoneCaches) fullKey (throttlePeriod throttleCfg)
+          currentCount <- incStoreWithZone (zscCounterCache zoneCaches) ipZone userKey (throttlePeriod throttleCfg)
           return (currentCount > throttleLimit throttleCfg)
         SlidingWindow -> do
           allowed <- SW.allowRequest
             (zscTimestampCache zoneCaches)
-            fullKey
-            (throttleLimit throttleCfg)
+            ipZone
+            userKey
             (throttlePeriod throttleCfg)
+            (throttleLimit throttleCfg)
           return (not allowed)
         TokenBucket -> do
-          let refillRate = fromIntegral (throttleLimit throttleCfg) / fromIntegral (throttlePeriod throttleCfg)
-              ttl = maybe 7200 id (throttleTokenBucketTTL throttleCfg) -- Default 2 hours if not set
+          let refillRate = fromIntegral (throttleLimit throttleCfg) / fromIntegral (throttlePeriod throttleCfg) :: Double
+              ttl = maybe 7200 id (throttleTokenBucketTTL throttleCfg)
           allowed <- TB.allowRequest
             (zscTokenBucketCache zoneCaches)
-            fullKey
+            ipZone
+            userKey
             (throttleLimit throttleCfg)
             refillRate
             ttl
           return (not allowed)
         LeakyBucket -> do
-          let leakRate = fromIntegral (throttleLimit throttleCfg) / fromIntegral (throttlePeriod throttleCfg)
-              ttl = throttlePeriod throttleCfg
+          let leakRate = ceiling (fromIntegral (throttleLimit throttleCfg) / fromIntegral (throttlePeriod throttleCfg) :: Double) :: Int
           allowed <- LB.allowRequest
             (zscLeakyBucketCache zoneCaches)
-            fullKey
+            ipZone
+            userKey
             (throttleLimit throttleCfg)
             leakRate
-            ttl
           return (not allowed)
         TinyLRU -> do
-          currentCount <- incStore (zscTinyLRUCache zoneCaches) fullKey (throttlePeriod throttleCfg)
+          currentCount <- incStoreWithZone (zscTinyLRUCache zoneCaches) ipZone userKey (throttlePeriod throttleCfg)
           return (currentCount > throttleLimit throttleCfg)
       when isBlocked $
         Notifications.notifyWAI
@@ -232,87 +179,31 @@ checkWithZone env throttleName throttleCfg req =
           (throttleLimit throttleCfg)
       return (isBlocked, env)
 
+-- | Reset all caches in the environment
 cacheResetAll :: Env -> IO ()
 cacheResetAll env = do
   cachesMap <- readIORef (envZoneCachesMap env)
   mapM_ resetSingleZoneCaches (Map.elems cachesMap)
 
--- | Helper functions for extracting data from WAI Request
-
--- | Extract client IP from WAI Request
-getClientIP :: Request -> Text
-getClientIP req = 
-  case lookup "x-forwarded-for" (WAI.requestHeaders req) of
-    Just xff -> T.takeWhile (/= ',') $ TE.decodeUtf8 xff  -- Take first IP from X-Forwarded-For
-    Nothing -> case lookup "x-real-ip" (WAI.requestHeaders req) of
-      Just realIP -> TE.decodeUtf8 realIP
-      Nothing -> case WAI.remoteHost req of
-        SockAddrInet _ addr -> T.pack $ show addr
-        SockAddrInet6 _ _ addr _ -> T.pack $ show addr  
-        SockAddrUnix path -> T.pack path
-        _ -> "unknown"
-
--- | Extract request path
-getRequestPath :: Request -> Text
-getRequestPath = TE.decodeUtf8 . WAI.rawPathInfo
-
--- | Extract request method  
-getRequestMethod :: Request -> Text
-getRequestMethod = TE.decodeUtf8 . WAI.requestMethod
-
--- | Extract host header
-getRequestHost :: Request -> Maybe Text
-getRequestHost req = TE.decodeUtf8 <$> WAI.requestHeaderHost req
-
--- | Extract user agent
-getRequestUserAgent :: Request -> Maybe Text  
-getRequestUserAgent req = TE.decodeUtf8 <$> WAI.requestHeaderUserAgent req
-
--- | Common throttle identifier functions
-
--- | Throttle by IP address
-byIP :: Request -> Maybe Text
-byIP = Just . getClientIP
-
--- | Throttle by IP + Path
-byIPAndPath :: Request -> Maybe Text
-byIPAndPath req = Just $ getClientIP req <> ":" <> getRequestPath req
-
--- | Throttle by IP + User Agent (useful for bot detection)
-byIPAndUserAgent :: Request -> Maybe Text  
-byIPAndUserAgent req = do
-  ua <- getRequestUserAgent req
-  return $ getClientIP req <> ":" <> ua
-
--- | Throttle by custom header value + IP
-byHeaderAndIP :: HeaderName -> Request -> Maybe Text
-byHeaderAndIP headerName req = do
-  headerValue <- lookup headerName (WAI.requestHeaders req)
-  return $ getClientIP req <> ":" <> TE.decodeUtf8 headerValue
-
--- | Example usage functions
-
--- | Create a simple IP-based rate limiter
 simpleIPRateLimit :: Int -> Int -> IO Env
 simpleIPRateLimit limit period = do
   env <- initConfig (const defaultIPZone)
   let throttle = ThrottleConfig
         { throttleLimit = limit
-        , throttlePeriod = period  
+        , throttlePeriod = period
         , throttleAlgorithm = FixedWindow
         , throttleIdentifier = byIP
         , throttleTokenBucketTTL = Nothing
         }
   return $ addThrottle env "ip_limit" throttle
 
--- | Create an API rate limiter (by IP + path)
-apiRateLimit :: Int -> Int -> IO Env  
+apiRateLimit :: Int -> Int -> IO Env
 apiRateLimit limit period = do
   env <- initConfig (const defaultIPZone)
   let throttle = ThrottleConfig
         { throttleLimit = limit
         , throttlePeriod = period
-        , throttleAlgorithm = SlidingWindow  -- More accurate for APIs
+        , throttleAlgorithm = SlidingWindow
         , throttleIdentifier = byIPAndPath
         , throttleTokenBucketTTL = Nothing
         }

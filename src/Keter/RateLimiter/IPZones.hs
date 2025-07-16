@@ -10,45 +10,6 @@ License     : MIT
 Maintainer  : oleksandr.zhabenko@yahoo.com
 Stability   : stable
 Portability : portable
-
-This module provides functionality to manage and organise caches that are specific to different IP zones within the Keter rate limiting system.
-
-== Overview
-
-In rate limiting systems, it is often useful to segment traffic by IP zones to apply different limits or policies. This module defines a structure to hold multiple caches per IP zone, each cache corresponding to a different rate limiting strategy or data.
-
-It offers utilities to create, reset, and manage these zone-specific caches efficiently.
-
-== Key Concepts
-
-- 'IPZoneIdentifier' is a type alias for a textual identifier of an IP zone, supporting both IPv4 and IPv6 addresses.
-- 'defaultIPZone' is the default identifier used when no specific zone is assigned.
-- 'ZoneSpecificCaches' groups together caches for different rate limiting algorithms:
-  - Counter cache (FixedWindow Algorithm)
-  - Timestamp cache (SlidingWindow Algorithm)
-  - Token bucket cache (TokenBucket Algorithm)
-  - Leaky bucket cache (LeakyBucket Algorithm)
-  - TinyLRU cache (TinyLRU Algorithm)
-
-== Functions
-
-- 'createZoneCaches' creates a new set of caches for a single IP zone.
-- 'resetSingleZoneCaches' clears all caches within a given 'ZoneSpecificCaches' instance.
-- 'resetZoneCache' clears a single cache for a specific algorithm within a 'ZoneSpecificCaches' instance.
-- 'newZoneSpecificCaches' is an alias for 'createZoneCaches' for convenience.
-
-== Usage Example
-
-@
-do
-  zoneCaches <- createZoneCaches
-  -- Use zoneCaches for rate limiting operations in this IP zone
-  -- Reset all caches:
-  resetSingleZoneCaches zoneCaches
-  -- Reset only the FixedWindow cache:
-  resetZoneCache zoneCaches FixedWindow
-@
-
 -}
 
 module Keter.RateLimiter.IPZones
@@ -63,6 +24,7 @@ module Keter.RateLimiter.IPZones
   ) where
 
 import Data.Text (Text)
+import qualified Data.Text as T
 import Keter.RateLimiter.Cache
   ( Cache(..)
   , InMemoryStore
@@ -70,11 +32,20 @@ import Keter.RateLimiter.Cache
   , createInMemoryStore
   , cacheReset
   , Algorithm(..)
+  , LeakyBucketCacheStore(..)
+  , startCustomPurgeLeakyBucket
   )
-import Network.Socket (SockAddr(..))
-import qualified Data.Text as T (pack, intercalate)
+import Keter.RateLimiter.LeakyBucketState (LeakyBucketState(..))
+import Network.Socket (SockAddr(..), HostAddress, HostAddress6)
+import Data.IP (IPv4, fromHostAddress)
+import Numeric (showHex)
 import Data.Bits
-import Text.Printf (printf)
+import Data.Map.Strict (Map)
+import qualified Data.Map.Strict as StrictMap
+import Control.Concurrent.STM (newTVarIO, atomically, writeTVar)
+import qualified StmContainers.Map as StmMap
+import Data.Time.Clock.POSIX (getPOSIXTime)
+import Debug.Trace (traceM)
 
 -- | Type alias representing an identifier for an IP zone, supporting IPv4 and IPv6 addresses.
 type IPZoneIdentifier = Text
@@ -88,7 +59,7 @@ data ZoneSpecificCaches = ZoneSpecificCaches
   { zscCounterCache     :: Cache (InMemoryStore 'FixedWindow)
   , zscTimestampCache   :: Cache (InMemoryStore 'SlidingWindow)
   , zscTokenBucketCache :: Cache (InMemoryStore 'TokenBucket)
-  , zscLeakyBucketCache :: Cache (InMemoryStore 'LeakyBucket)
+  , zscLeakyBucketCache :: Cache LeakyBucketCacheStore
   , zscTinyLRUCache     :: Cache (InMemoryStore 'TinyLRU)
   }
 
@@ -96,13 +67,20 @@ data ZoneSpecificCaches = ZoneSpecificCaches
 createZoneCaches :: IO ZoneSpecificCaches
 createZoneCaches = do
   counterStore <- createInMemoryStore @'FixedWindow
-  timestampStore <- createInMemoryStore @'SlidingWindow
+  slidingStore <- createInMemoryStore @'SlidingWindow
   tokenBucketStore <- createInMemoryStore @'TokenBucket
-  leakyBucketStore <- createInMemoryStore @'LeakyBucket
+  leakyBucketMap <- atomically StmMap.new
+  let leakyBucketStore = LeakyBucketCacheStore leakyBucketMap
+  -- Start a purge thread for LeakyBucketCacheStore
+  _ <- startCustomPurgeLeakyBucket
+         ((\(LeakyBucketCacheStore m) -> m) leakyBucketStore)
+         60    -- Purge interval (every 60 seconds)
+         7200  -- TTL (2 hours)
+         (\(LeakyBucketState _ lastTime) now -> now - lastTime <= 7200)
   tinyLRUStore <- createInMemoryStore @'TinyLRU
   return ZoneSpecificCaches
     { zscCounterCache     = newCache FixedWindow counterStore
-    , zscTimestampCache   = newCache SlidingWindow timestampStore
+    , zscTimestampCache   = newCache SlidingWindow slidingStore
     , zscTokenBucketCache = newCache TokenBucket tokenBucketStore
     , zscLeakyBucketCache = newCache LeakyBucket leakyBucketStore
     , zscTinyLRUCache     = newCache TinyLRU tinyLRUStore
@@ -133,11 +111,13 @@ newZoneSpecificCaches = createZoneCaches
 -- | Convert a socket address to an IP zone identifier
 sockAddrToIPZone :: SockAddr -> IO Text
 sockAddrToIPZone (SockAddrInet _ hostAddr) = do
-    let a = fromIntegral $ (hostAddr `shiftR` 24) .&. 0xFF
-        b = fromIntegral $ (hostAddr `shiftR` 16) .&. 0xFF
-        c = fromIntegral $ (hostAddr `shiftR` 8) .&. 0xFF
-        d = fromIntegral $ hostAddr .&. 0xFF
-    return $ T.pack $ show a ++ "." ++ show b ++ "." ++ show c ++ "." ++ show d
-sockAddrToIPZone (SockAddrInet6 _ _ (w1, w2, w3, w4) _) =
-    return $ T.intercalate ":" $ map (T.pack . printf "%04x") [w1 `shiftR` 16, w1 .&. 0xFFFF, w2 `shiftR` 16, w2 .&. 0xFFFF, w3 `shiftR` 16, w3 .&. 0xFFFF, w4 `shiftR` 16, w4 .&. 0xFFFF]
+  let ip = fromHostAddress hostAddr
+  traceM $ "sockAddrToIPZone IPv4: HostAddress=" ++ show hostAddr ++ ", IP=" ++ show ip
+  return $ T.pack $ show ip
+sockAddrToIPZone (SockAddrInet6 _ _ (w1, w2, w3, w4) _) = 
+  return $ T.intercalate ":" $ map (T.pack . showHexWord) 
+    [w1 `shiftR` 16, w1 .&. 0xFFFF, w2 `shiftR` 16, w2 .&. 0xFFFF, 
+     w3 `shiftR` 16, w3 .&. 0xFFFF, w4 `shiftR` 16, w4 .&. 0xFFFF]
+  where
+    showHexWord n = let s = showHex n "" in if length s < 4 then replicate (4 - length s) '0' ++ s else s
 sockAddrToIPZone _ = return "default"

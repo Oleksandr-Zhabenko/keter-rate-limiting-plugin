@@ -8,7 +8,7 @@ import Test.Tasty.HUnit
 import Network.Wai
 import Network.Wai.Test
 import Network.HTTP.Types
-import Network.Socket (SockAddr(..))
+import Network.Socket (SockAddr(..), tupleToHostAddress)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -17,11 +17,13 @@ import qualified Data.ByteString.Lazy as LBS
 import Control.Concurrent (threadDelay)
 import Control.Monad.IO.Class (liftIO)
 import Data.CaseInsensitive (CI, mk)
-import Keter.RateLimiter.WAI (initConfig, defaultIPZone, attackMiddleware, ThrottleConfig(..), Algorithm(..), byIP, addThrottle)
+import Keter.RateLimiter.WAI (initConfig, defaultIPZone, attackMiddleware, ThrottleConfig(..), addThrottle)
+import Keter.RateLimiter.RequestUtils
+import Keter.RateLimiter.Cache (Algorithm(..))
 
 -- Helper functions to create requests
 mkIPv4Request :: Request
-mkIPv4Request = defaultRequest { remoteHost = SockAddrInet 0 16777343 } -- 127.0.0.1
+mkIPv4Request = defaultRequest { remoteHost = SockAddrInet 0 (tupleToHostAddress (127, 0, 0, 1)) } -- 127.0.0.1
 
 mkIPv6Request :: Request
 mkIPv6Request = defaultRequest { remoteHost = SockAddrInet6 0 0 (0, 0, 0, 1) 0 } -- ::1
