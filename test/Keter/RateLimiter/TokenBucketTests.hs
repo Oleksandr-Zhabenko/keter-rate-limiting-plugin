@@ -25,6 +25,7 @@ import Keter.RateLimiter.TokenBucket (allowRequest)
 import Control.Monad.IO.Class (liftIO)
 import Network.Wai (remoteHost)
 import Data.CaseInsensitive (CI, mk)
+import Data.Function (fix)
 
 -- Helper functions to create requests
 mkIPv4Request :: Request
@@ -197,6 +198,7 @@ tests = testGroup "Token Bucket Tests"
       runSession session app
   , testCase "Handles concurrent requests" $ do
       env <- initConfig (const defaultIPZone)
+      cacheResetAll env -- Reset all caches
       let throttle = ThrottleConfig
             { throttleLimit = 2
             , throttlePeriod = 60
@@ -207,8 +209,10 @@ tests = testGroup "Token Bucket Tests"
       let env' = addThrottle env (T.pack "test_throttle") throttle
       let app = attackMiddleware env' mockApp
       mvar <- newMVar []
+      barrier <- newMVar 0
       let runRequest = do
             result <- srequest $ SRequest mkIPv4Request LBS.empty
+            liftIO $ modifyMVar_ barrier $ \c -> return (c + 1)
             return $ statusCode $ simpleStatus result
       -- Fork three concurrent requests
       _ <- forkIO $ do
@@ -220,7 +224,10 @@ tests = testGroup "Token Bucket Tests"
       _ <- forkIO $ do
         status <- runSession runRequest app
         modifyMVar_ mvar $ \results -> return (status : results)
-      threadDelay (2 * 1000000) -- Increased delay to ensure threads complete
+      -- Wait for all threads to complete
+      fix $ \loop -> do
+        count <- withMVar barrier return
+        if count == 3 then return () else threadDelay 100000 >> loop
       results <- withMVar mvar return
       let successes = length $ filter (== 200) results
           failures = length $ filter (== 429) results

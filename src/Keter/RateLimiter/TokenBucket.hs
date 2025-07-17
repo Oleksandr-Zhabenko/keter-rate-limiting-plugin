@@ -16,13 +16,18 @@ module Keter.RateLimiter.TokenBucket
   , allowRequest
   ) where
 
+import Control.Concurrent.STM (atomically, readTVar)
 import Control.Monad.IO.Class (MonadIO, liftIO)
-import Data.Aeson (FromJSON, ToJSON)
+import Data.Aeson (FromJSON, ToJSON, encode, decodeStrict)
 import qualified Data.Text as T
 import Data.Time.Clock.POSIX (getPOSIXTime)
+import qualified Data.Cache as C
+import qualified Data.ByteString.Lazy as LBS
+import qualified Data.Text.Encoding as TE
 import GHC.Generics (Generic)
 import Keter.RateLimiter.Cache
 import Data.Maybe (fromMaybe)
+import System.Clock (getTime, Clock(Monotonic))
 
 -- | Minimum TTL in seconds to prevent abuse in web applications
 -- Set to 2 seconds as this is appropriate for HTTP-based rate limiting:
@@ -48,18 +53,25 @@ allowRequest cache ipZone userKey capacity refillRate expiresIn = liftIO $ do
     then return False  -- Block request due to invalid TTL
     else do
       now <- floor <$> getPOSIXTime
-      mState <- readCacheWithZone cache ipZone userKey
-      let state = fromMaybe (TokenBucketState capacity now) mState
-          refilledState = refill state now
-      if tokens refilledState > 0
-        then do
-          let newState = refilledState { tokens = tokens refilledState - 1 }
-          writeCacheWithZone cache ipZone userKey newState expiresIn
-          return True
-        else do
-          -- No tokens, but we still need to write back the refilled state
-          writeCacheWithZone cache ipZone userKey refilledState expiresIn
-          return False
+      currentTime <- getTime Monotonic
+      expiryTimeSpec <- secondsToTimeSpec expiresIn
+      let key = makeCacheKey (cacheAlgorithm cache) ipZone userKey
+      -- Perform read, refill, check, and write in a single STM transaction
+      (result, newState) <- atomically $ do
+        let TokenBucketStore tvar = cacheStore cache
+        cache <- readTVar tvar
+        mval <- C.lookupSTM True key cache currentTime
+        let state = fromMaybe (TokenBucketState capacity now) (mval >>= decodeStrict . TE.encodeUtf8)
+            refilledState = refill state now
+        if tokens refilledState > 0
+          then do
+            let newState = refilledState { tokens = tokens refilledState - 1 }
+            C.insertSTM key (TE.decodeUtf8 (LBS.toStrict $ encode newState)) cache (Just expiryTimeSpec)
+            return (True, newState)
+          else do
+            C.insertSTM key (TE.decodeUtf8 (LBS.toStrict $ encode refilledState)) cache (Just expiryTimeSpec)
+            return (False, refilledState)
+      return result
   where
     refill :: TokenBucketState -> Int -> TokenBucketState
     refill (TokenBucketState oldTokens lastTime) nowTime =
