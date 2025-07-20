@@ -1,3 +1,4 @@
+-- Keter.RateLimiter.LeakyBucket.hs
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE LambdaCase #-}
@@ -8,82 +9,69 @@ module Keter.RateLimiter.LeakyBucket
   ( allowRequest
   ) where
 
-import Keter.RateLimiter.LeakyBucketState
-import Keter.RateLimiter.Cache
-import Data.Text (Text)
-import Control.Concurrent (forkIO)
-import Control.Concurrent.STM
-import Control.Concurrent.STM.TQueue
-import qualified Focus                     as F
-import qualified StmContainers.Map         as StmMap
-import Data.Time.Clock.POSIX (getPOSIXTime)
 import Control.Concurrent.MVar
-import Control.Monad (void, when, forever)
-import qualified Data.Text as T
+import Control.Concurrent.STM
+import Control.Monad              (when)
+import Control.Monad.IO.Class     (MonadIO, liftIO)
+import Data.Text                  (Text)
+import Data.Time.Clock.POSIX      (getPOSIXTime)
 
-type LeakyBucketMap = StmMap.Map Text (TVar LeakyBucketState, TQueue (MVar Bool))
+import Keter.RateLimiter.Types          (LeakyBucketState (..))
+import Keter.RateLimiter.Cache
+import Keter.RateLimiter.AutoPurge      (LeakyBucketEntry (..))
+import qualified Focus                  as F
+import qualified StmContainers.Map      as StmMap
 
--- | Spawn a background worker for a given user key to handle requests sequentially.
-startWorker
-  :: TVar LeakyBucketState
-  -> TQueue (MVar Bool)
-  -> Int       -- ^ Capacity
-  -> Int       -- ^ Leak rate
-  -> IO ()
-startWorker stateVar queue capacity leakRate = void . forkIO $ forever $ do
-  replyVar <- atomically $ readTQueue queue
-  now <- floor <$> getPOSIXTime
-  result <- atomically $ do
-    LeakyBucketState{level, lastTime} <- readTVar stateVar
-    let elapsed     = fromIntegral (now - lastTime) :: Double
-        leakedLevel = max 0 (level - elapsed * fromIntegral leakRate)
-        nextLevel   = leakedLevel + 1
-        newState    = LeakyBucketState
-          { level = if nextLevel > fromIntegral capacity then leakedLevel else nextLevel
-          , lastTime = now
-          }
-        allowed = nextLevel <= fromIntegral capacity
-    writeTVar stateVar newState
-    return allowed
-  putMVar replyVar result
+------------------------------------------------------------------------------
 
--- | Request permission under leaky bucket, per IP zone and user key.
+-- | Leaky-bucket limiter (capacity / leak-rate per key).
 allowRequest
-  :: Cache LeakyBucketCacheStore
-  -> Text              -- ^ IP-zone
-  -> Text              -- ^ user key
-  -> Int               -- ^ capacity
-  -> Int               -- ^ leak rate
-  -> IO Bool
-allowRequest (Cache _ (LeakyBucketCacheStore mapVar))
-             ipZone userKey capacity leakRate = do
-  let fullKey = makeCacheKey LeakyBucket ipZone userKey
+  :: MonadIO m
+  => Cache (InMemoryStore 'LeakyBucket)
+  -> Text     -- ^ IP-zone
+  -> Text     -- ^ User key
+  -> Int      -- ^ Capacity
+  -> Double   -- ^ Leak rate (requests drained per second)
+  -> m Bool
+allowRequest cache ipZone userKey capacity leakRate = liftIO $ do
+  now   <- floor <$> getPOSIXTime
+  let fullKey                 = makeCacheKey LeakyBucket ipZone userKey
+      LeakyBucketStore tvBuckets = cacheStore cache
   replyVar <- newEmptyMVar
-  now      <- floor <$> getPOSIXTime
 
-  -- Use Focus to get or create the bucket pair, tracking if it was newly created
-  wasNew <- atomically $ 
-    StmMap.focus (F.casesM
-        -- Case: bucket doesn't exist, create new one
-        (do
-          stateVar <- newTVar $ LeakyBucketState 0 now
-          queue    <- newTQueue
-          writeTQueue queue replyVar
-          pure (True, F.Set (stateVar, queue))
-        )
-        -- Case: bucket exists, use existing one
-        (\(stateVar, queue) -> do
-          writeTQueue queue replyVar
-          pure (False, F.Leave)
-        )
-      ) fullKey mapVar
+  -- For a new bucket, the initial state after this first request will be level 1.
+  newEntry <- createLeakyBucketEntry (LeakyBucketState 1 now)
 
-  -- If bucket was newly created, start worker
-  when wasNew $ do
-    -- Get the bucket pair from the map since we just created it
-    maybeBucketPair <- atomically $ StmMap.lookup fullKey mapVar
-    case maybeBucketPair of
-      Just (stateVar, queue) -> startWorker stateVar queue capacity leakRate
-      Nothing -> error "Race condition: bucket should exist after creation"
+  (wasNew, entry) <- atomically $ do
+     buckets <- readTVar tvBuckets
+     (isNew, ent) <-
+       StmMap.focus
+         (F.cases
+           -- bucket not present, use the newly created entry
+           ((True, newEntry), F.Set newEntry)
+           -- bucket already exists
+           (\existingEnt -> ((False, existingEnt), F.Leave))
+         )
+         fullKey buckets
+     pure (isNew, ent)
 
-  takeMVar replyVar
+  if wasNew
+    then do
+      -- For a new bucket, the first request is always allowed if capacity > 0.
+      -- The state has already been set to level=1.
+      let allowed = capacity > 0
+      when allowed $ do
+        -- Start the worker to handle SUBSEQUENT requests.
+        started <- atomically $ tryPutTMVar (lbeWorkerLock entry) ()
+        when started $
+          startLeakyBucketWorker
+            (lbeState entry)
+            (lbeQueue entry)
+            capacity
+            leakRate
+            fullKey
+      pure allowed
+    else do
+      -- For an existing bucket, enqueue the request and wait for the worker's response.
+      atomically $ writeTQueue (lbeQueue entry) replyVar
+      takeMVar replyVar

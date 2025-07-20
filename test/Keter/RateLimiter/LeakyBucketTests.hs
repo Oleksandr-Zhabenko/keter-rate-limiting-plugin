@@ -22,7 +22,8 @@ import Network.Socket (SockAddr(..), tupleToHostAddress)
 import Keter.RateLimiter.Cache
 import Keter.RateLimiter.RequestUtils
 import Keter.RateLimiter.WAI
-import Keter.RateLimiter.LeakyBucketState (LeakyBucketState(..))
+import Keter.RateLimiter.IPZones
+import Keter.RateLimiter.Types (LeakyBucketState(..))
 import Keter.RateLimiter.LeakyBucket (allowRequest)
 import Control.Monad.IO.Class (liftIO)
 import Data.CaseInsensitive (CI, mk)
@@ -60,7 +61,7 @@ tests = testGroup "Leaky Bucket Tests"
             , throttleIdentifier = byIP
             , throttleTokenBucketTTL = Nothing
             }
-      let env' = addThrottle env (T.pack "test_throttle") throttle
+      env' <- addThrottle env (T.pack "test_throttle") throttle
       let app = attackMiddleware env' mockApp
       let session = do
             result1 <- srequest $ SRequest mkIPv4Request LBS.empty
@@ -77,7 +78,7 @@ tests = testGroup "Leaky Bucket Tests"
             , throttleIdentifier = byIP
             , throttleTokenBucketTTL = Nothing
             }
-      let env' = addThrottle env (T.pack "test_throttle") throttle
+      env' <- addThrottle env (T.pack "test_throttle") throttle
       let app = attackMiddleware env' mockApp
       let session = do
             result1 <- srequest $ SRequest mkIPv4Request LBS.empty
@@ -96,7 +97,7 @@ tests = testGroup "Leaky Bucket Tests"
             , throttleIdentifier = byIP
             , throttleTokenBucketTTL = Nothing
             }
-      let env' = addThrottle env (T.pack "test_throttle") throttle
+      env' <- addThrottle env (T.pack "test_throttle") throttle
       let app = attackMiddleware env' mockApp
       let session = do
             result1 <- srequest $ SRequest mkIPv6Request LBS.empty
@@ -113,7 +114,7 @@ tests = testGroup "Leaky Bucket Tests"
             , throttleIdentifier = byIP
             , throttleTokenBucketTTL = Nothing
             }
-      let env' = addThrottle env (T.pack "test_throttle") throttle
+      env' <- addThrottle env (T.pack "test_throttle") throttle
       let app = attackMiddleware env' mockApp
       let session = do
             result1 <- srequest $ SRequest mkIPv6Request LBS.empty
@@ -132,7 +133,7 @@ tests = testGroup "Leaky Bucket Tests"
             , throttleIdentifier = byIP
             , throttleTokenBucketTTL = Nothing
             }
-      let env' = addThrottle env (T.pack "test_throttle") throttle
+      env' <- addThrottle env (T.pack "test_throttle") throttle
       let app = attackMiddleware env' mockApp
       let session = do
             result1 <- srequest $ SRequest mkIPv4Request LBS.empty
@@ -154,7 +155,7 @@ tests = testGroup "Leaky Bucket Tests"
             , throttleIdentifier = byIP
             , throttleTokenBucketTTL = Nothing
             }
-      let env' = addThrottle env (T.pack "test_throttle") throttle
+      env' <- addThrottle env (T.pack "test_throttle") throttle
       let app = attackMiddleware env' mockApp
       let req = mkRequestWithXFF (T.pack "192.168.1.1")
       let session = do
@@ -174,7 +175,7 @@ tests = testGroup "Leaky Bucket Tests"
             , throttleIdentifier = byIP
             , throttleTokenBucketTTL = Nothing
             }
-      let env' = addThrottle env (T.pack "test_throttle") throttle
+      env' <- addThrottle env (T.pack "test_throttle") throttle
       let app = attackMiddleware env' mockApp
       let req = mkRequestWithRealIP (T.pack "2001:db8::1")
       let session = do
@@ -195,7 +196,7 @@ tests = testGroup "Leaky Bucket Tests"
             , throttleIdentifier = byIP
             , throttleTokenBucketTTL = Nothing
             }
-      let env' = addThrottle env (T.pack "test_throttle") throttle
+      env' <- addThrottle env (T.pack "test_throttle") throttle
       let app = attackMiddleware env' mockApp
       mvar <- newMVar []
       barrier <- newMVar 0
@@ -224,10 +225,12 @@ tests = testGroup "Leaky Bucket Tests"
       assertEqual "One request should fail" 1 failures
   , testCase "Direct allowRequest allows request below capacity" $ do
       leakyBucketMap <- atomically StmMap.new
-      let cache = newCache LeakyBucket (LeakyBucketCacheStore leakyBucketMap)
-      -- Start a purge thread for the LeakyBucketCacheStore
+      -- Corrected: LeakyBucketStore expects a TVar, not directly the StmMap
+      leakyBucketTVar <- newTVarIO leakyBucketMap
+      let cache = newCache LeakyBucket (LeakyBucketStore leakyBucketTVar)
+      -- Start a purge thread for the LeakyBucketStore
+      -- Removed the extra predicate argument, as startCustomPurgeLeakyBucket doesn't take it.
       _ <- startCustomPurgeLeakyBucket leakyBucketMap 60 7200
-            (\(LeakyBucketState _ lastTime) now -> now - lastTime <= 7200)
       let ipZone = defaultIPZone
           userKey = "test_user"
           capacity = 2
@@ -238,10 +241,12 @@ tests = testGroup "Leaky Bucket Tests"
       assertBool "Second request should be allowed" allowed2
   , testCase "Direct allowRequest denies request at capacity" $ do
       leakyBucketMap <- atomically StmMap.new
-      let cache = newCache LeakyBucket (LeakyBucketCacheStore leakyBucketMap)
-      -- Start a purge thread for the LeakyBucketCacheStore
+      -- Corrected: LeakyBucketStore expects a TVar, not directly the StmMap
+      leakyBucketTVar <- newTVarIO leakyBucketMap
+      let cache = newCache LeakyBucket (LeakyBucketStore leakyBucketTVar)
+      -- Start a purge thread for the LeakyBucketStore
+      -- Removed the extra predicate argument, as startCustomPurgeLeakyBucket doesn't take it.
       _ <- startCustomPurgeLeakyBucket leakyBucketMap 60 7200
-            (\(LeakyBucketState _ lastTime) now -> now - lastTime <= 7200)
       let ipZone = defaultIPZone
           userKey = "test_user"
           capacity = 2

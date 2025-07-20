@@ -6,7 +6,7 @@ import Test.Tasty
 import Test.Tasty.HUnit
 import Data.Aeson (encode, decode)
 import qualified Data.ByteString.Lazy.Char8 as LBS
-import Keter.RateLimiter.LeakyBucketState (LeakyBucketState(..))
+import Keter.RateLimiter.Types (LeakyBucketState(..))
 
 -- | Test suite for Keter.RateLimiter.LeakyBucketState
 tests :: TestTree

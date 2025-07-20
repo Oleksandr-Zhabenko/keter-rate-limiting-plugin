@@ -1,3 +1,4 @@
+-- Keter.RateLimiter.IPZones.hs
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE TypeApplications #-}
@@ -27,24 +28,19 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import Keter.RateLimiter.Cache
   ( Cache(..)
-  , InMemoryStore
+  , InMemoryStore(..)
   , newCache
   , createInMemoryStore
   , cacheReset
   , Algorithm(..)
-  , LeakyBucketCacheStore(..)
   , startCustomPurgeLeakyBucket
   )
-import Keter.RateLimiter.LeakyBucketState (LeakyBucketState(..))
-import Network.Socket (SockAddr(..), HostAddress, HostAddress6)
-import Data.IP (IPv4, fromHostAddress)
+import Network.Socket (SockAddr(..))
+import Data.IP (fromHostAddress)
 import Numeric (showHex)
 import Data.Bits
-import Data.Map.Strict (Map)
-import qualified Data.Map.Strict as StrictMap
-import Control.Concurrent.STM (newTVarIO, atomically, writeTVar)
+import Control.Concurrent.STM (newTVarIO, atomically, readTVar) 
 import qualified StmContainers.Map as StmMap
-import Data.Time.Clock.POSIX (getPOSIXTime)
 import Debug.Trace (traceM)
 
 -- | Type alias representing an identifier for an IP zone, supporting IPv4 and IPv6 addresses.
@@ -59,7 +55,7 @@ data ZoneSpecificCaches = ZoneSpecificCaches
   { zscCounterCache     :: Cache (InMemoryStore 'FixedWindow)
   , zscTimestampCache   :: Cache (InMemoryStore 'SlidingWindow)
   , zscTokenBucketCache :: Cache (InMemoryStore 'TokenBucket)
-  , zscLeakyBucketCache :: Cache LeakyBucketCacheStore
+  , zscLeakyBucketCache :: Cache (InMemoryStore 'LeakyBucket) 
   , zscTinyLRUCache     :: Cache (InMemoryStore 'TinyLRU)
   }
 
@@ -69,14 +65,13 @@ createZoneCaches = do
   counterStore <- createInMemoryStore @'FixedWindow
   slidingStore <- createInMemoryStore @'SlidingWindow
   tokenBucketStore <- createInMemoryStore @'TokenBucket
-  leakyBucketMap <- atomically StmMap.new
-  let leakyBucketStore = LeakyBucketCacheStore leakyBucketMap
-  -- Start a purge thread for LeakyBucketCacheStore
+  leakyBucketTVar <- newTVarIO =<< atomically StmMap.new
+  let leakyBucketStore = LeakyBucketStore leakyBucketTVar
+  leakyBucketMap <- atomically $ readTVar leakyBucketTVar
   _ <- startCustomPurgeLeakyBucket
-         ((\(LeakyBucketCacheStore m) -> m) leakyBucketStore)
-         60    -- Purge interval (every 60 seconds)
-         7200  -- TTL (2 hours)
-         (\(LeakyBucketState _ lastTime) now -> now - lastTime <= 7200)
+         leakyBucketMap
+         (60 :: Integer)    -- Purge interval (every 60 seconds)
+         (7200 :: Integer)  -- TTL (2 hours)
   tinyLRUStore <- createInMemoryStore @'TinyLRU
   return ZoneSpecificCaches
     { zscCounterCache     = newCache FixedWindow counterStore

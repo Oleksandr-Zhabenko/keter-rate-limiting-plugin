@@ -29,7 +29,7 @@ import qualified Data.ByteString.Lazy as BL
 import Data.Aeson (FromJSON, ToJSON, encode, decodeStrict)
 import System.Clock (TimeSpec(..))
 import Data.Maybe (isNothing)
-import Control.Monad (when, forM_, foldM, forM)
+import Control.Monad (when, forM_, foldM)
 import qualified ListT
 
 -- | LRU node

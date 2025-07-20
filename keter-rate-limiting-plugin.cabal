@@ -28,11 +28,14 @@ library
         Data.TinyLRU
         Keter.RateLimiter.WAI
         Keter.RateLimiter.Cache
+        Keter.RateLimiter.CacheWithZone
         Keter.RateLimiter.IPZones
         Keter.RateLimiter.SlidingWindow
+        Keter.RateLimiter.TokenBucketWorker
         Keter.RateLimiter.TokenBucket
         Keter.RateLimiter.LeakyBucket
-        Keter.RateLimiter.LeakyBucketState
+        Keter.RateLimiter.Types
+        Keter.RateLimiter.AutoPurge
         Keter.RateLimiter.Notifications
         Keter.RateLimiter.RequestUtils
     -- other-modules: (add if you have internal modules)
@@ -55,7 +58,7 @@ library
         focus >=1.0.3,
         stm  >=2.5.0 && <2.6,
         stm-containers >=1.2 && <2,
-        mtl >=2.2.2 && <2.3 || ^>=2.3.1,
+        -- mtl >=2.2.2 && <2.3 || ^>=2.3.1,
         deepseq,
         list-t >=1.0.5 && <2,
         network >=3.1.2 && <3.2 || ^>=3.2.0,
@@ -79,6 +82,7 @@ test-suite keter-rate-limiting-plugin-test
         Keter.RateLimiter.LeakyBucketStateTests
         Keter.RateLimiter.NotificationTests
         Keter.RateLimiter.SlidingWindowTests
+        Keter.RateLimiter.TokenBucketStateTests
         Keter.RateLimiter.TokenBucketTests
         Keter.RateLimiter.WAITests
         TinyLRUTests

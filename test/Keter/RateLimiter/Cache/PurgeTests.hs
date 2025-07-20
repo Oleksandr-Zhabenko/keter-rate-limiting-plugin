@@ -7,7 +7,7 @@ import Test.Tasty.HUnit
 import qualified Data.Cache as C
 import Control.Concurrent (threadDelay)
 import Data.Text (Text)
-import System.Clock (TimeSpec(..), getTime, Clock(Monotonic))
+import System.Clock (TimeSpec(..))
 import Keter.RateLimiter.Cache (startAutoPurge) -- Import your module
 
 testBackgroundPurge :: TestTree

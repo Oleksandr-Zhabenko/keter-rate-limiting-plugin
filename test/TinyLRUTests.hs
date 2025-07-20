@@ -6,18 +6,15 @@ import Test.Tasty
 import Test.Tasty.HUnit
 import Control.Concurrent.STM
 import Control.Concurrent.Async (replicateConcurrently)
-import Data.Text (Text, pack)
-import Data.ByteString (ByteString)
+import Data.Text (pack)
 import qualified Data.ByteString as BS
-import Data.Aeson (encode, decodeStrict)
+import Data.Aeson (decodeStrict)
 import System.Clock (TimeSpec(..), Clock(Monotonic), getTime)
 import Data.TinyLRU
-import Keter.RateLimiter.Cache (Algorithm(..), Cache, InMemoryStore(..), newCache, createInMemoryStore, readCache, writeCache, deleteCache, readCacheWithZone, writeCacheWithZone, deleteCacheWithZone, cacheStore)
--- import Keter.RateLimiter.TinyLRUAlgorithm (allowRequest)
+import Keter.RateLimiter.Cache (Algorithm(..), Cache, InMemoryStore(..), newCache, createInMemoryStore, readCache, writeCache, deleteCache, cacheStore)
+import Keter.RateLimiter.CacheWithZone (readCacheWithZone, writeCacheWithZone, deleteCacheWithZone)
 import Control.Monad
-import Control.Monad.IO.Class (liftIO)
 import Control.Concurrent (threadDelay)
-import StmContainers.Map (Map, size)
 import qualified StmContainers.Map as Map
 import System.Random (randomRIO)
 import Data.Maybe (isJust)

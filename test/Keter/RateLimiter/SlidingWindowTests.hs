@@ -5,26 +5,25 @@ module Keter.RateLimiter.SlidingWindowTests (tests) where
 
 import Test.Tasty
 import Test.Tasty.HUnit
-import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
-import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
 import Control.Monad (replicateM_)
 import Control.Concurrent (threadDelay, forkIO)
-import Control.Concurrent.MVar (newMVar, modifyMVar_, withMVar, MVar)
+import Control.Concurrent.MVar (newMVar, modifyMVar_, withMVar)
 import Network.Wai (Request, Application, defaultRequest, requestHeaders, responseLBS, remoteHost)
-import Network.Wai.Test (runSession, srequest, SRequest(..), SResponse, assertStatus, simpleStatus)
-import Network.HTTP.Types (methodGet, status200, status429)
+import Network.Wai.Test (runSession, srequest, SRequest(..), assertStatus, simpleStatus)
+import Network.HTTP.Types (status200)
 import Network.HTTP.Types.Status (statusCode)
 import Network.Socket (SockAddr(..), tupleToHostAddress)
 import Keter.RateLimiter.Cache
 import Keter.RateLimiter.WAI
 import Keter.RateLimiter.SlidingWindow (allowRequest)
 import Keter.RateLimiter.RequestUtils
+import Keter.RateLimiter.IPZones (defaultIPZone) -- Add this import
 import Control.Monad.IO.Class (liftIO)
-import Data.CaseInsensitive (CI, mk)
+import Data.CaseInsensitive (mk)
 
 -- Helper functions to create requests
 mkIPv4Request :: Request
@@ -55,7 +54,7 @@ tests = testGroup "Sliding Window Tests"
             , throttleIdentifier = byIP
             , throttleTokenBucketTTL = Nothing
             }
-      let env' = addThrottle env (T.pack "test_throttle") throttle
+      env' <- addThrottle env (T.pack "test_throttle") throttle -- Fix: bind the IO action
       let app = attackMiddleware env' mockApp
       let session = do
             result1 <- srequest $ SRequest mkIPv4Request LBS.empty
@@ -72,7 +71,7 @@ tests = testGroup "Sliding Window Tests"
             , throttleIdentifier = byIP
             , throttleTokenBucketTTL = Nothing
             }
-      let env' = addThrottle env (T.pack "test_throttle") throttle
+      env' <- addThrottle env (T.pack "test_throttle") throttle -- Fix: bind the IO action
       let app = attackMiddleware env' mockApp
       let session = do
             result1 <- srequest $ SRequest mkIPv4Request LBS.empty
@@ -91,7 +90,7 @@ tests = testGroup "Sliding Window Tests"
             , throttleIdentifier = byIP
             , throttleTokenBucketTTL = Nothing
             }
-      let env' = addThrottle env (T.pack "test_throttle") throttle
+      env' <- addThrottle env (T.pack "test_throttle") throttle -- Fix: bind the IO action
       let app = attackMiddleware env' mockApp
       let session = do
             result1 <- srequest $ SRequest mkIPv6Request LBS.empty
@@ -108,7 +107,7 @@ tests = testGroup "Sliding Window Tests"
             , throttleIdentifier = byIP
             , throttleTokenBucketTTL = Nothing
             }
-      let env' = addThrottle env (T.pack "test_throttle") throttle
+      env' <- addThrottle env (T.pack "test_throttle") throttle -- Fix: bind the IO action
       let app = attackMiddleware env' mockApp
       let session = do
             result1 <- srequest $ SRequest mkIPv6Request LBS.empty
@@ -127,7 +126,7 @@ tests = testGroup "Sliding Window Tests"
             , throttleIdentifier = byIP
             , throttleTokenBucketTTL = Nothing
             }
-      let env' = addThrottle env (T.pack "test_throttle") throttle
+      env' <- addThrottle env (T.pack "test_throttle") throttle -- Fix: bind the IO action
       let app = attackMiddleware env' mockApp
       let session = do
             result1 <- srequest $ SRequest mkIPv4Request LBS.empty
@@ -149,7 +148,7 @@ tests = testGroup "Sliding Window Tests"
             , throttleIdentifier = byIP
             , throttleTokenBucketTTL = Nothing
             }
-      let env' = addThrottle env (T.pack "test_throttle") throttle
+      env' <- addThrottle env (T.pack "test_throttle") throttle -- Fix: bind the IO action
       let app = attackMiddleware env' mockApp
       let req = mkRequestWithXFF (T.pack "192.168.1.1")
       let session = do
@@ -169,7 +168,7 @@ tests = testGroup "Sliding Window Tests"
             , throttleIdentifier = byIP
             , throttleTokenBucketTTL = Nothing
             }
-      let env' = addThrottle env (T.pack "test_throttle") throttle
+      env' <- addThrottle env (T.pack "test_throttle") throttle -- Fix: bind the IO action
       let app = attackMiddleware env' mockApp
       let req = mkRequestWithRealIP (T.pack "2001:db8::1")
       let session = do
@@ -189,7 +188,7 @@ tests = testGroup "Sliding Window Tests"
             , throttleIdentifier = byIP
             , throttleTokenBucketTTL = Nothing
             }
-      let env' = addThrottle env (T.pack "test_throttle") throttle
+      env' <- addThrottle env (T.pack "test_throttle") throttle -- Fix: bind the IO action
       let app = attackMiddleware env' mockApp
       mvar <- newMVar []
       let runRequest = do
@@ -220,7 +219,7 @@ tests = testGroup "Sliding Window Tests"
             , throttleIdentifier = byIP
             , throttleTokenBucketTTL = Nothing
             }
-      let env' = addThrottle env (T.pack "test_throttle") throttle
+      env' <- addThrottle env (T.pack "test_throttle") throttle -- Fix: bind the IO action
       let app = attackMiddleware env' mockApp
       mvar <- newMVar []
       let runRequest = do

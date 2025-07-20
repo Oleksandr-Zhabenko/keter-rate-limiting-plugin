@@ -5,10 +5,9 @@ module Keter.RateLimiter.IPZonesTests (tests) where
 import Test.Tasty
 import Test.Tasty.HUnit
 import Network.Socket (SockAddr(..), tupleToHostAddress)
-import Data.Text (Text)
-import qualified Data.Text as T
 import Keter.RateLimiter.IPZones
 import Keter.RateLimiter.Cache
+import Keter.RateLimiter.CacheWithZone
 import Control.Monad.IO.Class (liftIO)
 import Control.Concurrent (threadDelay)
 

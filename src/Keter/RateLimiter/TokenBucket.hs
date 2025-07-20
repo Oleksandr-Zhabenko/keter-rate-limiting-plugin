@@ -1,81 +1,106 @@
+-- Keter.RateLimiter.TokenBucket.hs
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE DeriveGeneric #-}
-
-{-|
-Module      : Keter.RateLimiter.TokenBucket
-Description : Token bucket rate limiting algorithm implementation
-Copyright   : (c) 2025 Oleksandr Zhabenko
-License     : MIT
-Maintainer  : oleksandr.zhabenko@yahoo.com
-Stability   : stable
-Portability : portable
--}
+{-# LANGUAGE DataKinds #-}
 
 module Keter.RateLimiter.TokenBucket
-  ( TokenBucketState(..)
-  , allowRequest
+  ( allowRequest
   ) where
 
-import Control.Concurrent.STM (atomically, readTVar)
-import Control.Monad.IO.Class (MonadIO, liftIO)
-import Data.Aeson (FromJSON, ToJSON, encode, decodeStrict)
+import Control.Concurrent.MVar
+import Control.Concurrent.STM
+import Control.Monad            (when, void)
+import Control.Monad.IO.Class   (MonadIO, liftIO)
+import Data.Text                (Text)
 import qualified Data.Text as T
-import Data.Time.Clock.POSIX (getPOSIXTime)
-import qualified Data.Cache as C
-import qualified Data.ByteString.Lazy as LBS
-import qualified Data.Text.Encoding as TE
-import GHC.Generics (Generic)
-import Keter.RateLimiter.Cache
-import Data.Maybe (fromMaybe)
-import System.Clock (getTime, Clock(Monotonic))
+import Data.Time.Clock.POSIX    (getPOSIXTime)
 
--- | Minimum TTL in seconds to prevent abuse in web applications
--- Set to 2 seconds as this is appropriate for HTTP-based rate limiting:
--- - Prevents cache thrashing from very short TTLs
--- - Still allows reasonable rate limiting for web requests
--- - Most legitimate web usage patterns don't need sub-2-second windows
+import Keter.RateLimiter.Cache
+import Keter.RateLimiter.Types          (TokenBucketState (..))
+import Keter.RateLimiter.AutoPurge      (TokenBucketEntry (..))
+import qualified Focus                  as F
+import qualified StmContainers.Map      as StmMap
+import Keter.RateLimiter.TokenBucketWorker (startTokenBucketWorker)
+
+------------------------------------------------------------------------------
+
 minTTL :: Int
 minTTL = 2
 
--- | Attempt to allow a request based on the token bucket algorithm.
+-- | Check whether a request may pass the token-bucket limiter.
 allowRequest
   :: MonadIO m
   => Cache (InMemoryStore 'TokenBucket)
-  -> T.Text       -- ^ IP zone
-  -> T.Text       -- ^ User key
-  -> Int          -- ^ Capacity
-  -> Double       -- ^ Refill rate (tokens per second)
-  -> Int          -- ^ Expires in (seconds)
+  -> Text    -- ^ IP zone
+  -> Text    -- ^ User key
+  -> Int     -- ^ Capacity
+  -> Double  -- ^ Refill rate (tokens / second)
+  -> Int     -- ^ TTL (seconds)
   -> m Bool
-allowRequest cache ipZone userKey capacity refillRate expiresIn = liftIO $ do
-  -- Validate TTL against minimum required value
+allowRequest cache ipZone userKey capacity refillRate expiresIn = liftIO $
   if expiresIn < minTTL
-    then return False  -- Block request due to invalid TTL
-    else do
-      now <- floor <$> getPOSIXTime
-      currentTime <- getTime Monotonic
-      expiryTimeSpec <- secondsToTimeSpec expiresIn
-      let key = makeCacheKey (cacheAlgorithm cache) ipZone userKey
-      -- Perform read, refill, check, and write in a single STM transaction
-      (result, newState) <- atomically $ do
-        let TokenBucketStore tvar = cacheStore cache
-        cache <- readTVar tvar
-        mval <- C.lookupSTM True key cache currentTime
-        let state = fromMaybe (TokenBucketState capacity now) (mval >>= decodeStrict . TE.encodeUtf8)
-            refilledState = refill state now
-        if tokens refilledState > 0
-          then do
-            let newState = refilledState { tokens = tokens refilledState - 1 }
-            C.insertSTM key (TE.decodeUtf8 (LBS.toStrict $ encode newState)) cache (Just expiryTimeSpec)
-            return (True, newState)
-          else do
-            C.insertSTM key (TE.decodeUtf8 (LBS.toStrict $ encode refilledState)) cache (Just expiryTimeSpec)
-            return (False, refilledState)
-      return result
-  where
-    refill :: TokenBucketState -> Int -> TokenBucketState
-    refill (TokenBucketState oldTokens lastTime) nowTime =
-      let elapsed = fromIntegral (nowTime - lastTime) :: Double
-          addedTokens = floor $ elapsed * refillRate
-          newTokens = min capacity (oldTokens + addedTokens)
-      in TokenBucketState newTokens (if addedTokens > 0 then nowTime else lastTime)
+     then do
+       putStrLn $
+         "TokenBucket: Request denied due to invalid TTL: "
+           ++ show expiresIn
+       pure False
+     else do
+       now <- floor <$> getPOSIXTime
+       let key                     = makeCacheKey (cacheAlgorithm cache) ipZone userKey
+           TokenBucketStore tvBuckets = cacheStore cache
+       replyVar <- newEmptyMVar
+
+       ----------------------------------------------------------------------
+       -- 1. Obtain (or create) bucket entry and enqueue the request.
+       -- Create the entry in IO, then pass it into the STM transaction.
+       newEntryInitialState <- createTokenBucketEntry (TokenBucketState (capacity - 1) now)
+       
+       (wasNew, entry) <- atomically $ do
+         buckets <- readTVar tvBuckets
+         -- Use F.Focus directly to allow STM actions in the handler, bypassing F.cases.
+         (wasNewEntry, ent) <-
+           StmMap.focus
+             (F.Focus
+                -- Handler for when the key is NOT found (the "Nothing" case)
+                (pure ((True, newEntryInitialState), F.Set newEntryInitialState))
+                -- Handler for when the key IS found (the "Just" case)
+                (\existingEnt -> do
+                  -- This handler can now perform STM actions.
+                  workerLockEmpty <- isEmptyTMVar (tbeWorkerLock existingEnt)
+                  if workerLockEmpty
+                    then pure ((True, newEntryInitialState), F.Set newEntryInitialState)  -- Replace dead entry
+                    else pure ((False, existingEnt), F.Leave)     -- Keep existing entry
+                )
+             )
+             key buckets
+         pure (wasNewEntry, ent)
+
+       ----------------------------------------------------------------------
+       -- 2. Spawn a worker once for a fresh bucket.
+       if wasNew
+         then
+           -- For a new bucket, the first request is allowed only if there is capacity.
+           if capacity > 0
+             then do
+               workerReadyVar <- atomically newEmptyTMVar
+               atomically $ putTMVar (tbeWorkerLock entry) () -- Mark worker lock as taken
+               -- Start the worker with ready synchronization
+               startTokenBucketWorker (tbeState entry)
+                                      (tbeQueue entry)
+                                      capacity
+                                      refillRate
+                                      key
+                                      workerReadyVar
+               -- Wait for the worker to signal it's ready before proceeding
+               atomically $ takeTMVar workerReadyVar
+               putStrLn $ "TokenBucket: Key=" ++ T.unpack key ++ ", Allowed=True (new bucket)"
+               pure True
+             else do
+               -- If capacity is 0, no request can ever be allowed.
+               putStrLn $ "TokenBucket: Key=" ++ T.unpack key ++ ", Allowed=False (capacity is 0)"
+               pure False
+         else do
+           -- For existing buckets, enqueue the request and wait for response
+           atomically $ writeTQueue (tbeQueue entry) replyVar
+           result <- takeMVar replyVar
+           putStrLn $ "TokenBucket: Key=" ++ T.unpack key ++ ", Allowed=" ++ show result
+           pure result

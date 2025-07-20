@@ -7,15 +7,12 @@ import Test.Tasty
 import Test.Tasty.HUnit
 import Data.Text (Text)
 import qualified Data.Text as T
-import qualified Data.Text.Encoding as TE
 import qualified Data.ByteString.Char8 as BS8
-import Network.Wai (Request, defaultRequest, requestMethod, rawPathInfo, rawQueryString, remoteHost)
+import Network.Wai (defaultRequest, requestMethod, rawPathInfo, rawQueryString, remoteHost)
 import Network.Socket (SockAddr(..), tupleToHostAddress, tupleToHostAddress6)
 import System.IO (hClose, stdout, hFlush)
 import GHC.IO.Handle (hDuplicate, hDuplicateTo)
 import System.IO.Temp (withSystemTempFile)
-import Data.Time.Clock (getCurrentTime)
-import Data.Time.Format (formatTime, defaultTimeLocale)
 import Control.Monad (when)
 import Keter.RateLimiter.Notifications
 

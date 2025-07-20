@@ -30,9 +30,7 @@ import qualified Network.Wai as WAI
 import Network.Socket (SockAddr(..), HostAddress, HostAddress6, hostAddressToTuple)
 import Network.HTTP.Types.Header (HeaderName)
 import Data.Bits
-import Data.IP (fromHostAddress)
-import Data.CaseInsensitive (CI, mk)
-import System.IO.Unsafe (unsafePerformIO)
+import Data.CaseInsensitive (mk)
 import Numeric (showHex)
 
 -- | Helper functions for extracting data from WAI Request
@@ -59,7 +57,6 @@ getClientIP req = do
             SockAddrInet _ addr -> ipv4ToString addr
             SockAddrInet6 _ _ addr _ -> ipv6ToString addr
             SockAddrUnix path -> T.pack path
-            _ -> "default"
   return ip
 
 getRequestPath :: Request -> Text
@@ -74,18 +71,26 @@ getRequestHost req = TE.decodeUtf8 <$> WAI.requestHeaderHost req
 getRequestUserAgent :: Request -> Maybe Text
 getRequestUserAgent req = TE.decodeUtf8 <$> WAI.requestHeaderUserAgent req
 
-byIP :: Request -> Maybe Text
-byIP req = Just $ unsafePerformIO $ getClientIP req
+byIP :: Request -> IO (Maybe Text)
+byIP req = Just <$> getClientIP req
 
-byIPAndPath :: Request -> Maybe Text
-byIPAndPath req = Just $ (unsafePerformIO $ getClientIP req) <> ":" <> getRequestPath req
+byIPAndPath :: Request -> IO (Maybe Text)
+byIPAndPath req = do
+  ip <- getClientIP req
+  return $ Just $ ip <> ":" <> getRequestPath req
 
-byIPAndUserAgent :: Request -> Maybe Text
+byIPAndUserAgent :: Request -> IO (Maybe Text)
 byIPAndUserAgent req = do
-  ua <- getRequestUserAgent req
-  return $ (unsafePerformIO $ getClientIP req) <> ":" <> ua
+  ip <- getClientIP req
+  let ua = getRequestUserAgent req
+  return $ case ua of
+    Nothing -> Nothing
+    Just ua' -> Just $ ip <> ":" <> ua'
 
-byHeaderAndIP :: HeaderName -> Request -> Maybe Text
+byHeaderAndIP :: HeaderName -> Request -> IO (Maybe Text)
 byHeaderAndIP headerName req = do
-  headerValue <- lookup headerName (WAI.requestHeaders req)
-  return $ (unsafePerformIO $ getClientIP req) <> ":" <> TE.decodeUtf8 headerValue
+  ip <- getClientIP req
+  let headerValue = lookup headerName (WAI.requestHeaders req)
+  return $ case headerValue of
+    Nothing -> Nothing
+    Just hv -> Just $ ip <> ":" <> TE.decodeUtf8 hv

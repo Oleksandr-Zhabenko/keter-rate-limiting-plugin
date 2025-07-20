@@ -1,4 +1,3 @@
--- test/Main.hs
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE GADTs #-}
@@ -23,25 +22,25 @@ import qualified Data.Text.Encoding as TE
 import Network.Wai (Request, Response, Application, requestMethod, rawPathInfo, requestHeaderHost, remoteHost, responseLBS, requestHeaders, defaultRequest)
 import Network.HTTP.Types (Method, methodGet)
 import Network.Socket (SockAddr(..))
-import Keter.RateLimiter.Cache
-  ( Cache(..), CacheStore(..), InMemoryStore(..), Algorithm(..), makeCacheKey, readCache, 
-    createInMemoryStore, newCache, incStore, incStoreWithZone, writeCache, writeCacheWithZone, 
-    readCacheWithZone, deleteCache, deleteCacheWithZone, cacheReset )
+import Keter.RateLimiter.Cache ( Cache(..), CacheStore(..), InMemoryStore(..), Algorithm(..), makeCacheKey, readCache, createInMemoryStore, newCache, incrementCache, writeCache, deleteCache, cacheReset )
+import Keter.RateLimiter.CacheWithZone ( incStoreWithZone, writeCacheWithZone, readCacheWithZone, deleteCacheWithZone )
 import Keter.RateLimiter.IPZones (IPZoneIdentifier(..), defaultIPZone, zscCounterCache)
-import Keter.RateLimiter.WAI
-  ( Env, ZoneSpecificCaches(..), ThrottleConfig(..), initConfig, addThrottle, 
-    instrument, defaultIPZone, envZoneCachesMap, cacheResetAll )
-import Keter.RateLimiter.RequestUtils
+import Keter.RateLimiter.WAI ( Env, ThrottleConfig(..), initConfig, addThrottle, instrument, envZoneCachesMap, cacheResetAll )
+import Keter.RateLimiter.IPZones (ZoneSpecificCaches(..), defaultIPZone)
+import qualified Keter.RateLimiter.RequestUtils as RequestUtils
 import System.IO.Unsafe (unsafePerformIO)
-import TinyLRUTests (tests)
+
+-- Import test modules with qualified names to avoid ambiguity
+import qualified TinyLRUTests
 import Keter.RateLimiter.Cache.PurgeTests
-import Keter.RateLimiter.IPZonesTests
-import Keter.RateLimiter.LeakyBucketStateTests
-import Keter.RateLimiter.LeakyBucketTests
-import Keter.RateLimiter.NotificationTests
-import Keter.RateLimiter.SlidingWindowTests
-import Keter.RateLimiter.TokenBucketTests
-import Keter.RateLimiter.WAITests
+import qualified Keter.RateLimiter.IPZonesTests
+import qualified Keter.RateLimiter.LeakyBucketStateTests
+import qualified Keter.RateLimiter.LeakyBucketTests
+import qualified Keter.RateLimiter.NotificationTests
+import qualified Keter.RateLimiter.SlidingWindowTests
+import qualified Keter.RateLimiter.TokenBucketTests
+import qualified Keter.RateLimiter.WAITests
+import qualified Keter.RateLimiter.TokenBucketStateTests
 
 -- IPs and Zone Identifiers for testing
 testIPZoneA, testIPZoneB :: IPZoneIdentifier
@@ -55,9 +54,10 @@ genericTestIP = "192.168.1.1"
 genericTestIP2 = "192.168.1.2"
 
 -- Helper function to extract IP from WAI Request for zone determination
-testGetRequestIPZone :: Request -> IPZoneIdentifier
-testGetRequestIPZone req =
-  let ip = unsafePerformIO $ getClientIP req
+-- Rename this function to avoid conflict with TokenBucketTests
+mainTestGetRequestIPZone :: Request -> IPZoneIdentifier
+mainTestGetRequestIPZone req =
+  let ip = unsafePerformIO $ RequestUtils.getClientIP req
   in case ip of
     _ | ip == ipForZoneA -> testIPZoneA
       | ip == ipForZoneB -> testIPZoneB
@@ -65,6 +65,10 @@ testGetRequestIPZone req =
       | ip == genericTestIP2 -> defaultIPZone
       | ip == ipForDefaultZone -> defaultIPZone
       | otherwise -> defaultIPZone
+
+-- Helper to extract request path
+getRequestPath :: Request -> Text
+getRequestPath req = Text.pack $ show $ rawPathInfo req
 
 -- Helper to create a mock WAI Request with specified IP and path
 makeRequest :: Text -> Text -> Request
@@ -95,6 +99,7 @@ getResponseBody _ = return "Success" -- Simplified
 isRateLimited :: Response -> Bool
 isRateLimited _ = False -- Simplified
 
+-- Helper to execute multiple requests and verify responses
 executeRequests :: Env -> [Request] -> [Text] -> IO ()
 executeRequests env requests expectedResponses = do
   actualResponses <- mapM (processRequest env) requests
@@ -107,20 +112,22 @@ executeRequests env requests expectedResponses = do
 
 main :: IO ()
 main = do
-  result <- try @SomeException $ defaultMain Main.tests
+  result <- try @SomeException $ defaultMain mainTests
   case result of
     Left ex -> putStrLn $ "Test suite failed with exception: " ++ show ex
     Right () -> putStrLn "Test suite completed successfully"
 
-tests :: TestTree
-tests = testGroup "Rate Limiter and IP Zones Tests"
-  [ TinyLRUTests.tests -- From TinyLRUTests.hs
-  , testBackgroundPurge -- For testing of the background purging of the expired keys to prevent memory leakage conditions
+-- Rename the main tests function to avoid ambiguity
+mainTests :: TestTree
+mainTests = testGroup "Rate Limiter and IP Zones Tests"
+  [ TinyLRUTests.tests
+  , testBackgroundPurge
   , rateLimiterTests
   , ipZoneTests
   , cacheApiTests
   , Keter.RateLimiter.IPZonesTests.tests
   , Keter.RateLimiter.LeakyBucketStateTests.tests
+  , Keter.RateLimiter.TokenBucketStateTests.tests
   , Keter.RateLimiter.LeakyBucketTests.tests
   , Keter.RateLimiter.SlidingWindowTests.tests
   , Keter.RateLimiter.TokenBucketTests.tests
@@ -143,50 +150,57 @@ rateLimiterTests = testGroup "General Rate Limiter Tests (with Default IP Zone)"
 
 testFixedWindow :: IO ()
 testFixedWindow = do
-  env <- initConfig testGetRequestIPZone
+  env <- initConfig mainTestGetRequestIPZone
   let throttleConfig = ThrottleConfig
         { throttleLimit = 3
         , throttlePeriod = 10
         , throttleAlgorithm = FixedWindow
-        , throttleIdentifier = Just . (\req -> unsafePerformIO $ getClientIP req)
+        , throttleIdentifier = \req -> Just <$> RequestUtils.getClientIP req
         , throttleTokenBucketTTL = Nothing
         }
-      envWithThrottle = addThrottle env "test-throttle" throttleConfig
-      requests = replicate 5 $ makeRequest genericTestIP "/test"
+  envWithThrottle <- addThrottle env "test-throttle" throttleConfig
+  let requests = replicate 5 $ makeRequest genericTestIP "/test"
       expectedResponses = replicate 3 "Success" ++ replicate 2 "Too Many Requests"
   executeRequests envWithThrottle requests expectedResponses
 
 testSlidingWindow :: IO ()
 testSlidingWindow = do
-  env <- initConfig testGetRequestIPZone
+  env <- initConfig mainTestGetRequestIPZone
   let throttleConfig = ThrottleConfig
         { throttleLimit = 3
         , throttlePeriod = 10
         , throttleAlgorithm = SlidingWindow
-        , throttleIdentifier = Just . (\req -> unsafePerformIO $ getClientIP req)
+        , throttleIdentifier = \req -> Just <$> RequestUtils.getClientIP req
         , throttleTokenBucketTTL = Nothing
         }
-      envWithThrottle = addThrottle env "test-throttle" throttleConfig
-      requests = replicate 5 $ makeRequest genericTestIP "/test"
+  envWithThrottle <- addThrottle env "test-throttle" throttleConfig
+  let requests = replicate 5 $ makeRequest genericTestIP "/test"
       expectedResponses = replicate 3 "Success" ++ replicate 2 "Too Many Requests"
   executeRequests envWithThrottle requests expectedResponses
+  -- Test partial window overlap
+  threadDelay (5_000_000) -- Wait 5s (half period)
+  blocked <- instrument envWithThrottle (makeRequest genericTestIP "/test")
+  assertEqual "Request in overlapping window should be blocked" True blocked
+  threadDelay (5_500_000) -- Wait 5.5s (past period)
+  blocked' <- instrument envWithThrottle (makeRequest genericTestIP "/test")
+  assertEqual "Request after full period should succeed" False blocked'
 
 testTokenBucket :: IO ()
 testTokenBucket = do
   let ttlSeconds = 3
-  env <- initConfig testGetRequestIPZone
+  env <- initConfig mainTestGetRequestIPZone
   let throttleConfig = ThrottleConfig
         { throttleLimit = 3
         , throttlePeriod = 1
         , throttleAlgorithm = TokenBucket
-        , throttleIdentifier = Just . (\req -> unsafePerformIO $ getClientIP req)
+        , throttleIdentifier = \req -> Just <$> RequestUtils.getClientIP req
         , throttleTokenBucketTTL = Just ttlSeconds
         }
-      envWithThrottle = addThrottle env "test-throttle" throttleConfig
-      requests = replicate 5 $ makeRequest genericTestIP "/test"
+  envWithThrottle <- addThrottle env "test-throttle" throttleConfig
+  let requests = replicate 5 $ makeRequest genericTestIP "/test"
       expectedResponses = replicate 3 "Success" ++ replicate 2 "Too Many Requests"
   executeRequests envWithThrottle requests expectedResponses
-  threadDelay ((ttlSeconds + 1) * 1000000)
+  threadDelay ((ttlSeconds + 1) * 1_000_000)
   blocked <- instrument envWithThrottle (makeRequest genericTestIP "/test")
   assertEqual "Request should succeed after TTL expiry and refill" False blocked
   b1 <- instrument envWithThrottle (makeRequest genericTestIP "/test")
@@ -196,37 +210,47 @@ testTokenBucket = do
 
 testLeakyBucket :: IO ()
 testLeakyBucket = do
-  env <- initConfig testGetRequestIPZone
+  env <- initConfig mainTestGetRequestIPZone
   let throttleConfig = ThrottleConfig
         { throttleLimit = 3
         , throttlePeriod = 10
         , throttleAlgorithm = LeakyBucket
-        , throttleIdentifier = Just . (\req -> unsafePerformIO $ getClientIP req)
+        , throttleIdentifier = \req -> Just <$> RequestUtils.getClientIP req
         , throttleTokenBucketTTL = Nothing
         }
-      envWithThrottle = addThrottle env "test-throttle" throttleConfig
-      requests = replicate 5 $ makeRequest genericTestIP "/test"
-      expectedResponses = replicate 3 "Success" ++ replicate 2 "Too Many Requests"
-  executeRequests envWithThrottle requests expectedResponses
-  threadDelay (4 * 1000000)
-  blocked <- instrument envWithThrottle (makeRequest genericTestIP "/test")
-  assertEqual "Request should succeed after leaking" False blocked
+  envWithThrottle <- addThrottle env "test-throttle" throttleConfig
+  let req = makeRequest genericTestIP "/test"
+  -- Test burst behavior
+  blocked1 <- instrument envWithThrottle req
+  blocked2 <- instrument envWithThrottle req
+  blocked3 <- instrument envWithThrottle req
+  assertEqual "First 3 requests succeed" [False, False, False] [blocked1, blocked2, blocked3]
+  blocked4 <- instrument envWithThrottle req
+  assertEqual "Fourth request blocked" True blocked4
+  -- Test steady leak rate (1 token every ~3.33s for limit=3, period=10)
+  threadDelay (3_500_000) -- Wait ~3.5s for 1 token to leak
+  blocked5 <- instrument envWithThrottle req
+  assertEqual "Request succeeds after leak" False blocked5
+  -- Verify subsequent request is blocked
+  blocked6 <- instrument envWithThrottle req
+  assertEqual "Next request blocked" True blocked6
 
 testPathSpecificThrottle :: IO ()
 testPathSpecificThrottle = do
-  env <- initConfig testGetRequestIPZone
+  env <- initConfig mainTestGetRequestIPZone
   let throttleConfig = ThrottleConfig
         { throttleLimit = 2
         , throttlePeriod = 10
         , throttleAlgorithm = FixedWindow
-        , throttleIdentifier = \req ->
-            if getRequestPath req == "/login"
-            then Just ((unsafePerformIO $ getClientIP req) <> ":" <> getRequestPath req)
-            else Nothing
+        , throttleIdentifier = \req -> do
+            ip <- RequestUtils.getClientIP req
+            return $ if getRequestPath req == "\"/login\""
+                     then Just (ip <> Text.pack ":" <> getRequestPath req)
+                     else Nothing
         , throttleTokenBucketTTL = Nothing
         }
-      envWithThrottle = addThrottle env "login-throttle" throttleConfig
-      loginRequests = replicate 3 $ makeRequest genericTestIP "/login"
+  envWithThrottle <- addThrottle env "login-throttle" throttleConfig
+  let loginRequests = replicate 3 $ makeRequest genericTestIP "/login"
       homeRequests = replicate 3 $ makeRequest genericTestIP "/home"
       expectedLoginResponses = replicate 2 "Success" ++ ["Too Many Requests"]
       expectedHomeResponses = replicate 3 "Success"
@@ -235,27 +259,28 @@ testPathSpecificThrottle = do
 
 testMultipleThrottles :: IO ()
 testMultipleThrottles = do
-  env <- initConfig testGetRequestIPZone
+  env <- initConfig mainTestGetRequestIPZone
   let ipThrottleConfig = ThrottleConfig
         { throttleLimit = 5
         , throttlePeriod = 10
         , throttleAlgorithm = FixedWindow
-        , throttleIdentifier = Just . (\req -> unsafePerformIO $ getClientIP req)
+        , throttleIdentifier = \req -> Just <$> RequestUtils.getClientIP req
         , throttleTokenBucketTTL = Nothing
         }
       loginThrottleConfig = ThrottleConfig
         { throttleLimit = 2
         , throttlePeriod = 10
         , throttleAlgorithm = SlidingWindow
-        , throttleIdentifier = \req ->
-            if getRequestPath req == "/login"
-            then Just ((unsafePerformIO $ getClientIP req) <> ":" <> getRequestPath req)
-            else Nothing
+        , throttleIdentifier = \req -> do
+            ip <- RequestUtils.getClientIP req
+            return $ if getRequestPath req == "\"/login\""
+                     then Just (ip <> Text.pack ":" <> getRequestPath req)
+                     else Nothing
         , throttleTokenBucketTTL = Nothing
         }
-      envWithIpThrottle = addThrottle env "ip-throttle" ipThrottleConfig
-      envWithBothThrottles = addThrottle envWithIpThrottle "login-throttle" loginThrottleConfig
-      requests = [ makeRequest genericTestIP "/login"
+  envWithIpThrottle <- addThrottle env "ip-throttle" ipThrottleConfig
+  envWithBothThrottles <- addThrottle envWithIpThrottle "login-throttle" loginThrottleConfig
+  let requests = [ makeRequest genericTestIP "/login"
                  , makeRequest genericTestIP "/login"
                  , makeRequest genericTestIP "/login"
                  , makeRequest genericTestIP "/home"
@@ -269,22 +294,22 @@ testMultipleThrottles = do
 
 testOriginalResetAfterPeriod :: IO ()
 testOriginalResetAfterPeriod = do
-  env1 <- initConfig testGetRequestIPZone
+  env1 <- initConfig mainTestGetRequestIPZone
   let throttleConfig = ThrottleConfig
         { throttleLimit = 2
         , throttlePeriod = 1
         , throttleAlgorithm = FixedWindow
-        , throttleIdentifier = Just . (\req -> unsafePerformIO $ getClientIP req)
+        , throttleIdentifier = \req -> Just <$> RequestUtils.getClientIP req
         , throttleTokenBucketTTL = Nothing
         }
-      envWithThrottle1 = addThrottle env1 "test-throttle" throttleConfig
-      requests1 = replicate 3 $ makeRequest genericTestIP "/test"
+  envWithThrottle1 <- addThrottle env1 "test-throttle" throttleConfig
+  let requests1 = replicate 3 $ makeRequest genericTestIP "/test"
       expectedResponses1 = replicate 2 "Success" ++ ["Too Many Requests"]
   executeRequests envWithThrottle1 requests1 expectedResponses1
-  threadDelay (1100000)
-  env2 <- initConfig testGetRequestIPZone
-  let envWithThrottle2 = addThrottle env2 "test-throttle" throttleConfig
-      requests2 = replicate 3 $ makeRequest genericTestIP2 "/test"
+  threadDelay (1_100_000)
+  env2 <- initConfig mainTestGetRequestIPZone
+  envWithThrottle2 <- addThrottle env2 "test-throttle" throttleConfig
+  let requests2 = replicate 3 $ makeRequest genericTestIP2 "/test"
       expectedResponses2 = replicate 2 "Success" ++ ["Too Many Requests"]
   executeRequests envWithThrottle2 requests2 expectedResponses2
 
@@ -292,16 +317,16 @@ testTimeBasedReset :: IO ()
 testTimeBasedReset = do
   let periodSec = 1
       limit = 1
-  env <- initConfig testGetRequestIPZone
+  env <- initConfig mainTestGetRequestIPZone
   let throttleConfig = ThrottleConfig
         { throttleLimit = limit
         , throttlePeriod = periodSec
         , throttleAlgorithm = FixedWindow
-        , throttleIdentifier = Just . (\req -> unsafePerformIO $ getClientIP req)
+        , throttleIdentifier = \req -> Just <$> RequestUtils.getClientIP req
         , throttleTokenBucketTTL = Nothing
         }
-      envWithThrottle = addThrottle env "reset-throttle" throttleConfig
-      req = makeRequest ipForZoneA "/reset_test"
+  envWithThrottle <- addThrottle env "reset-throttle" throttleConfig
+  let req = makeRequest ipForZoneA "/reset_test"
   -- First request
   blocked1 <- instrument envWithThrottle req
   assertEqual "First request to zone A should succeed" False blocked1
@@ -317,7 +342,7 @@ testTimeBasedReset = do
     Nothing -> assertFailure "Zone caches not found" >> return undefined
   let cache :: Cache (InMemoryStore 'FixedWindow)
       cache = zscCounterCache zoneCaches
-      key = makeCacheKey FixedWindow testIPZoneA (unsafePerformIO $ getClientIP req)
+      key = makeCacheKey FixedWindow testIPZoneA (unsafePerformIO $ RequestUtils.getClientIP req)
   mVal <- readCache cache key :: IO (Maybe Int)
   when (isJust mVal) $ putStrLn $ "Cache value before third request: " ++ show mVal
   -- Try manually deleting if it exists
@@ -343,16 +368,16 @@ testIPZoneIsolation :: IO ()
 testIPZoneIsolation = do
   let limit = 1
       period = 10
-  env <- initConfig testGetRequestIPZone
+  env <- initConfig mainTestGetRequestIPZone
   let throttleConfig = ThrottleConfig
         { throttleLimit = limit
         , throttlePeriod = period
         , throttleAlgorithm = FixedWindow
-        , throttleIdentifier = Just . (\req -> unsafePerformIO $ getClientIP req)
+        , throttleIdentifier = \req -> Just <$> RequestUtils.getClientIP req
         , throttleTokenBucketTTL = Nothing
         }
-      envWithThrottle = addThrottle env "test-throttle" throttleConfig
-      reqA1 = makeRequest ipForZoneA "/test"
+  envWithThrottle <- addThrottle env "test-throttle" throttleConfig
+  let reqA1 = makeRequest ipForZoneA "/test"
       reqB1 = makeRequest ipForZoneB "/test"
   b1 <- instrument envWithThrottle reqA1
   assertEqual "Zone A first request allowed" False b1
@@ -363,16 +388,16 @@ testIPZoneIsolation = do
 
 testIPZoneDefaultFallback :: IO ()
 testIPZoneDefaultFallback = do
-  env <- initConfig testGetRequestIPZone
+  env <- initConfig mainTestGetRequestIPZone
   let throttleConfig = ThrottleConfig
         { throttleLimit = 1
         , throttlePeriod = 10
         , throttleAlgorithm = FixedWindow
-        , throttleIdentifier = Just . (\req -> unsafePerformIO $ getClientIP req)
+        , throttleIdentifier = \req -> Just <$> RequestUtils.getClientIP req
         , throttleTokenBucketTTL = Nothing
         }
-      envWithThrottle = addThrottle env "test-throttle" throttleConfig
-      reqDefault = makeRequest ipForDefaultZone "/test"
+  envWithThrottle <- addThrottle env "test-throttle" throttleConfig
+  let reqDefault = makeRequest ipForDefaultZone "/test"
       reqGeneric = makeRequest genericTestIP "/test"
   b1 <- instrument envWithThrottle reqDefault
   assertEqual "Default zone first request allowed" False b1
@@ -381,16 +406,16 @@ testIPZoneDefaultFallback = do
 
 testIPZoneCacheResetAll :: IO ()
 testIPZoneCacheResetAll = do
-  env <- initConfig testGetRequestIPZone
+  env <- initConfig mainTestGetRequestIPZone
   let throttleConfig = ThrottleConfig
         { throttleLimit = 1
         , throttlePeriod = 10
         , throttleAlgorithm = FixedWindow
-        , throttleIdentifier = Just . (\req -> unsafePerformIO $ getClientIP req)
+        , throttleIdentifier = \req -> Just <$> RequestUtils.getClientIP req
         , throttleTokenBucketTTL = Nothing
         }
-      envWithThrottle = addThrottle env "test-throttle" throttleConfig
-      reqA = makeRequest ipForZoneA "/test"
+  envWithThrottle <- addThrottle env "test-throttle" throttleConfig
+  let reqA = makeRequest ipForZoneA "/test"
       reqB = makeRequest ipForZoneB "/test"
   _ <- instrument envWithThrottle reqA
   _ <- instrument envWithThrottle reqB
@@ -426,9 +451,9 @@ testIncStoreManual = do
   store <- createInMemoryStore @'FixedWindow
   let cache :: Cache (InMemoryStore 'FixedWindow)
       cache = newCache FixedWindow store
-      customKey = "fixed_window:zoneY:userY:extra"
-  v1 <- incStore cache customKey 10 :: IO Int
-  v2 <- incStore cache customKey 10 :: IO Int
+      customKey = "zoneY:userY:extra"
+  v1 <- incrementCache cache customKey 10 :: IO Int
+  v2 <- incrementCache cache customKey 10 :: IO Int
   assertEqual "First increment (manual)" 1 v1
   assertEqual "Second increment (manual)" 2 v2
 
@@ -449,7 +474,7 @@ testReadWriteCacheManual = do
   store <- createInMemoryStore @'FixedWindow
   let cache :: Cache (InMemoryStore 'FixedWindow)
       cache = newCache FixedWindow store
-      customKey = "fixed_window:zoneW:userW:custom"
+      customKey = "zoneW:userW:custom"
       val = 99 :: Int
   writeCache cache customKey val 10
   mVal <- readCache cache customKey :: IO (Maybe Int)

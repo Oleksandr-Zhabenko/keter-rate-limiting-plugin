@@ -1,211 +1,128 @@
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE TypeApplications #-}
-
-{-|
-Module      : Keter.RateLimiter.WAI
-Description : Comprehensive rate limiting middleware with IP zone support and convenient/customisable key management
-Copyright   : (c) 2025 Oleksandr Zhabenko
-License     : MIT
-Maintainer  : oleksandr.zhabenko@yahoo.com
-Stability   : stable
-Portability : portable
--}
+{-# LANGUAGE DataKinds #-}
 
 module Keter.RateLimiter.WAI
-  ( Env(..)
-  , attackMiddleware
-  , instrument
-  , Configuration(..)
-  , defaultConfiguration
+  ( Env
+  , ThrottleConfig(..)
   , initConfig
   , addThrottle
-  , ThrottleConfig(..)
+  , attackMiddleware
+  , instrument
   , cacheResetAll
-  , IPZoneIdentifier
-  , defaultIPZone
-  , ZoneSpecificCaches
-  , simpleIPRateLimit
-  , apiRateLimit
+  , envZoneCachesMap
   ) where
 
-import qualified Data.Map.Strict as Map
-import Data.Map.Strict (Map)
 import Data.Text (Text)
 import qualified Data.Text as T
-import GHC.Generics (Generic)
-import Network.Wai (Request, Response, Middleware, ResponseReceived)
-import qualified Network.Wai as WAI
-import Network.HTTP.Types (Status, status429)
-import Data.IP (fromHostAddress, fromHostAddress6)
-import Debug.Trace (traceM)
-import qualified Keter.RateLimiter.Notifications as Notifications
-import Keter.RateLimiter.IPZones (IPZoneIdentifier, defaultIPZone, ZoneSpecificCaches(..), newZoneSpecificCaches, resetSingleZoneCaches)
-import Keter.RateLimiter.Cache (Cache(..), Algorithm(..), makeCacheKey, incStoreWithZone)
-import Keter.RateLimiter.SlidingWindow as SW (allowRequest)
-import Keter.RateLimiter.TokenBucket as TB (allowRequest)
-import Keter.RateLimiter.LeakyBucket as LB (allowRequest)
-import Data.IORef (IORef, newIORef, readIORef, modifyIORef')
-import Control.Monad (when)
-import Keter.RateLimiter.RequestUtils (getClientIP, getRequestPath, getRequestMethod, byIP, byIPAndPath, byIPAndUserAgent, byHeaderAndIP)
+import qualified Data.Text.Encoding as TE
+import qualified Data.Map.Strict as Map
+import Network.Wai
+import Network.HTTP.Types (status429)
+import qualified Data.ByteString.Lazy as LBS
+import Data.IORef
+import Control.Concurrent.STM
+import Control.Monad.IO.Class (liftIO)
+import Keter.RateLimiter.Cache
+import Keter.RateLimiter.IPZones (IPZoneIdentifier, defaultIPZone, ZoneSpecificCaches(..), createZoneCaches)
+import qualified Keter.RateLimiter.SlidingWindow as SlidingWindow
+import qualified Keter.RateLimiter.TokenBucket as TokenBucket
+import qualified Keter.RateLimiter.LeakyBucket as LeakyBucket
+import Keter.RateLimiter.RequestUtils
+import Keter.RateLimiter.CacheWithZone (allowFixedWindowRequest)
+import Data.TinyLRU (allowRequestTinyLRU)
+import System.Clock (TimeSpec, Clock(Monotonic), getTime)
+import Data.Maybe (fromMaybe)
 
--- | Environment holding configuration and caches per IP zone.
-data Env = Env
-  { envConfig :: Configuration
-  , envZoneCachesMap :: IORef (Map IPZoneIdentifier ZoneSpecificCaches)
-  }
-
--- | Configuration for the rate limiter
-data Configuration = Configuration
-  { configThrottles :: Map Text ThrottleConfig
-  , configNotifier :: Notifications.WAINotifier
-  , configGetRequestIPZone :: Request -> IPZoneIdentifier
-  , configRateLimitResponse :: Request -> Response
-  }
-
--- | For TokenBucket, use 'throttleTokenBucketTTL' to specify cache TTL (in seconds).
 data ThrottleConfig = ThrottleConfig
   { throttleLimit :: Int
   , throttlePeriod :: Int
   , throttleAlgorithm :: Algorithm
-  , throttleIdentifier :: Request -> Maybe Text
+  , throttleIdentifier :: Request -> IO (Maybe Text)
   , throttleTokenBucketTTL :: Maybe Int
   }
 
--- | Default rate limit response (429 Too Many Requests)
-defaultRateLimitResponse :: Request -> Response
-defaultRateLimitResponse _ = WAI.responseLBS 
-  status429 
-  [("Content-Type", "text/plain")]
-  "Too Many Requests"
-
-defaultConfiguration :: Configuration
-defaultConfiguration = Configuration
-  { configThrottles = Map.empty
-  , configNotifier = Notifications.consoleWAINotifier
-  , configGetRequestIPZone = const defaultIPZone
-  , configRateLimitResponse = defaultRateLimitResponse
+data Env = Env
+  { envZoneCachesMap :: IORef (Map.Map IPZoneIdentifier ZoneSpecificCaches)
+  , envThrottles :: IORef (Map.Map Text ThrottleConfig)
+  , envGetRequestIPZone :: Request -> IPZoneIdentifier
   }
 
 initConfig :: (Request -> IPZoneIdentifier) -> IO Env
 initConfig getIPZone = do
-  let config = defaultConfiguration { configGetRequestIPZone = getIPZone }
-  cachesRef <- newIORef Map.empty
-  return Env { envConfig = config, envZoneCachesMap = cachesRef }
+  defaultCaches <- createZoneCaches
+  zoneCachesMap <- newIORef $ Map.singleton defaultIPZone defaultCaches
+  throttles <- newIORef Map.empty
+  return $ Env zoneCachesMap throttles getIPZone
 
-addThrottle :: Env -> Text -> ThrottleConfig -> Env
-addThrottle env name cfg =
-  let newThrottles = Map.insert name cfg (configThrottles $ envConfig env)
-  in env { envConfig = (envConfig env) { configThrottles = newThrottles } }
+addThrottle :: Env -> Text -> ThrottleConfig -> IO Env
+addThrottle env name config = do
+  modifyIORef' (envThrottles env) $ Map.insert name config
+  return env
 
-attackMiddleware :: Env -> Middleware
+attackMiddleware :: Env -> Application -> Application
 attackMiddleware env app req respond = do
   blocked <- instrument env req
   if blocked
-    then respond (configRateLimitResponse (envConfig env) req)
+    then respond $ responseLBS status429 [] (LBS.fromStrict $ TE.encodeUtf8 "Too Many Requests")
     else app req respond
 
+-- | Gets the cache for a given zone, creating it if it doesn't exist.
+getOrCreateZoneCaches :: Env -> IPZoneIdentifier -> IO ZoneSpecificCaches
+getOrCreateZoneCaches env zone = do
+  readIORef (envZoneCachesMap env) >>= \m ->
+    case Map.lookup zone m of
+      Just caches -> return caches
+      Nothing -> do
+        newCaches <- createZoneCaches
+        atomicModifyIORef' (envZoneCachesMap env) $ \currentMap ->
+          let updatedMap = Map.insertWith (\_ old -> old) zone newCaches currentMap
+          in (updatedMap, updatedMap Map.! zone)
+
 instrument :: Env -> Request -> IO Bool
-instrument initialEnv req = do
-  let throttles = Map.toList (configThrottles $ envConfig initialEnv)
-  let go :: Bool -> Env -> [(Text, ThrottleConfig)] -> IO (Bool, Env)
-      go currentBlocked currentEnv [] = return (currentBlocked, currentEnv)
-      go currentBlocked currentEnv ((name, throttleCfg):remainingThrottles) = do
-        if currentBlocked
-          then return (True, currentEnv)
-          else do
-            (blocked, updatedEnv) <- checkWithZone currentEnv name throttleCfg req
-            go blocked updatedEnv remainingThrottles
-  (isBlocked, _) <- go False initialEnv throttles
-  return isBlocked
+instrument env req = do
+  throttles <- readIORef (envThrottles env)
+  let zone = envGetRequestIPZone env req
+  zoneCaches <- getOrCreateZoneCaches env zone
+  anyBlocked <- or <$> mapM (checkThrottle zoneCaches zone req) (Map.elems throttles)
+  return anyBlocked
+  where
+    checkThrottle :: ZoneSpecificCaches -> Text -> Request -> ThrottleConfig -> IO Bool
+    checkThrottle caches zone req config = do
+      mIdentifier <- throttleIdentifier config req
+      case mIdentifier of
+        Nothing -> return False
+        Just identifier -> case throttleAlgorithm config of
+          FixedWindow -> not <$> allowFixedWindowRequest (zscCounterCache caches) zone identifier (throttleLimit config) (throttlePeriod config)
+          SlidingWindow -> do
+            let TimestampStore tvar = cacheStore (zscTimestampCache caches)
+            not <$> SlidingWindow.allowRequest tvar zone identifier (throttlePeriod config) (throttleLimit config)
+          TokenBucket -> do
+            let period = throttlePeriod config
+                limit = throttleLimit config
+                refillRate = if period > 0 then fromIntegral limit / fromIntegral period else 0.0
+            not <$> TokenBucket.allowRequest (zscTokenBucketCache caches) zone identifier limit refillRate (fromMaybe 2 (throttleTokenBucketTTL config))
+          LeakyBucket -> do
+            let period = throttlePeriod config
+                limit = throttleLimit config
+                leakRate = if period > 0 then fromIntegral limit / fromIntegral period else 0.0
+            not <$> LeakyBucket.allowRequest (zscLeakyBucketCache caches) zone identifier limit leakRate
+          TinyLRU -> do
+            now <- getTime Monotonic
+            case cacheStore (zscTinyLRUCache caches) of
+              TinyLRUStore tvar -> do
+                cache <- readTVarIO tvar
+                not <$> atomically (allowRequestTinyLRU now cache identifier (throttleLimit config) (throttlePeriod config))
 
-checkWithZone :: Env -> Text -> ThrottleConfig -> Request -> IO (Bool, Env)
-checkWithZone env throttleName throttleCfg req = do
-  case throttleIdentifier throttleCfg req of
-    Nothing -> return (False, env)
-    Just userKey -> do
-      let config = envConfig env
-      -- FIXED: Use the configured function to get the IP zone, not a hardcoded call.
-      let ipZone = configGetRequestIPZone config req
-      cachesMap <- readIORef (envZoneCachesMap env)
-      zoneCaches <- case Map.lookup ipZone cachesMap of
-        Just caches -> return caches
-        Nothing -> do
-          newCaches <- newZoneSpecificCaches
-          modifyIORef' (envZoneCachesMap env) (Map.insert ipZone newCaches)
-          return newCaches
-      let fullKey = makeCacheKey (throttleAlgorithm throttleCfg) ipZone userKey
-      traceM $ "Checking throttle: " ++ T.unpack throttleName ++ ", Key: " ++ T.unpack fullKey
-      isBlocked <- case throttleAlgorithm throttleCfg of
-        FixedWindow -> do
-          currentCount <- incStoreWithZone (zscCounterCache zoneCaches) ipZone userKey (throttlePeriod throttleCfg)
-          return (currentCount > throttleLimit throttleCfg)
-        SlidingWindow -> do
-          allowed <- SW.allowRequest
-            (zscTimestampCache zoneCaches)
-            ipZone
-            userKey
-            (throttlePeriod throttleCfg)
-            (throttleLimit throttleCfg)
-          return (not allowed)
-        TokenBucket -> do
-          let refillRate = fromIntegral (throttleLimit throttleCfg) / fromIntegral (throttlePeriod throttleCfg) :: Double
-              ttl = maybe 7200 id (throttleTokenBucketTTL throttleCfg)
-          allowed <- TB.allowRequest
-            (zscTokenBucketCache zoneCaches)
-            ipZone
-            userKey
-            (throttleLimit throttleCfg)
-            refillRate
-            ttl
-          return (not allowed)
-        LeakyBucket -> do
-          let leakRate = ceiling (fromIntegral (throttleLimit throttleCfg) / fromIntegral (throttlePeriod throttleCfg) :: Double) :: Int
-          allowed <- LB.allowRequest
-            (zscLeakyBucketCache zoneCaches)
-            ipZone
-            userKey
-            (throttleLimit throttleCfg)
-            leakRate
-          return (not allowed)
-        TinyLRU -> do
-          currentCount <- incStoreWithZone (zscTinyLRUCache zoneCaches) ipZone userKey (throttlePeriod throttleCfg)
-          return (currentCount > throttleLimit throttleCfg)
-      when isBlocked $
-        Notifications.notifyWAI
-          (configNotifier config)
-          throttleName
-          req
-          (throttleLimit throttleCfg)
-      return (isBlocked, env)
-
--- | Reset all caches in the environment
 cacheResetAll :: Env -> IO ()
 cacheResetAll env = do
-  cachesMap <- readIORef (envZoneCachesMap env)
-  mapM_ resetSingleZoneCaches (Map.elems cachesMap)
-
-simpleIPRateLimit :: Int -> Int -> IO Env
-simpleIPRateLimit limit period = do
-  env <- initConfig (const defaultIPZone)
-  let throttle = ThrottleConfig
-        { throttleLimit = limit
-        , throttlePeriod = period
-        , throttleAlgorithm = FixedWindow
-        , throttleIdentifier = byIP
-        , throttleTokenBucketTTL = Nothing
-        }
-  return $ addThrottle env "ip_limit" throttle
-
-apiRateLimit :: Int -> Int -> IO Env
-apiRateLimit limit period = do
-  env <- initConfig (const defaultIPZone)
-  let throttle = ThrottleConfig
-        { throttleLimit = limit
-        , throttlePeriod = period
-        , throttleAlgorithm = SlidingWindow
-        , throttleIdentifier = byIPAndPath
-        , throttleTokenBucketTTL = Nothing
-        }
-  return $ addThrottle env "api_limit" throttle
+  zoneCachesMap <- readIORef (envZoneCachesMap env)
+  mapM_ (resetZoneCaches . snd) (Map.toList zoneCachesMap)
+  where
+    resetZoneCaches :: ZoneSpecificCaches -> IO ()
+    resetZoneCaches caches = do
+      cacheReset (zscCounterCache caches)
+      cacheReset (zscTimestampCache caches)
+      cacheReset (zscTokenBucketCache caches)
+      cacheReset (zscLeakyBucketCache caches)
+      cacheReset (zscTinyLRUCache caches)
