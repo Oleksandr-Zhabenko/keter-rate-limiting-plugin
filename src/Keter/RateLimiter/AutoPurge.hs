@@ -36,7 +36,7 @@ data TokenBucketEntry = TokenBucketEntry
 -- | Leaky bucket entry with worker synchronization
 data LeakyBucketEntry = LeakyBucketEntry
   { lbeState :: TVar LeakyBucketState
-  , lbeQueue :: TQueue.TQueue (MVar Bool)
+  , lbeQueue :: TQueue.TQueue (TMVar Bool)
   , lbeWorkerLock :: TMVar ()  -- Empty = no worker, Full = worker exists
   }
 

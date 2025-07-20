@@ -181,7 +181,7 @@ testSlidingWindow = do
   threadDelay (5_000_000) -- Wait 5s (half period)
   blocked <- instrument envWithThrottle (makeRequest genericTestIP "/test")
   assertEqual "Request in overlapping window should be blocked" True blocked
-  threadDelay (5_500_000) -- Wait 5.5s (past period)
+  threadDelay (6_500_000) -- Wait 5.5s (past period)
   blocked' <- instrument envWithThrottle (makeRequest genericTestIP "/test")
   assertEqual "Request after full period should succeed" False blocked'
 

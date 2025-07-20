@@ -332,32 +332,25 @@ focusInsertOrUpdate getState entry newVal = Focus.Focus
 
 startLeakyBucketWorker
   :: TVar LeakyBucketState
-  -> TQueue.TQueue (MVar Bool)
+  -> TQueue.TQueue (TMVar Bool)
   -> Int       -- ^ Capacity
   -> Double    -- ^ Leak rate (requests drained per second)
   -> Text      -- ^ Key for logging
   -> IO ()
 startLeakyBucketWorker stateVar queue capacity leakRate fullKey = void . forkIO $ forever $ do
   replyVar <- atomically $ readTQueue queue
-  now <- liftIO $ floor <$> getPOSIXTime
+  now <- floor <$> getPOSIXTime
   result <- atomically $ do
     LeakyBucketState{level, lastTime} <- readTVar stateVar
-    let elapsed     = fromIntegral (now - lastTime) :: Double
+    let elapsed     = fromIntegral (now - lastTime)
         leakedLevel = max 0 (level - elapsed * leakRate)
         nextLevel   = leakedLevel + 1
-        allowed = nextLevel <= fromIntegral capacity
-        finalLevel = if allowed then nextLevel else leakedLevel
-        -- Only update lastTime on a successful request. This correctly reflects the
-        -- algorithm's logic and avoids unreliable floating-point comparisons.
-        updatedLastTime = if allowed then now else lastTime
-        newState = LeakyBucketState
-          { level = finalLevel
-          , lastTime = updatedLastTime
-          }
-    writeTVar stateVar newState
+        allowed     = nextLevel <= fromIntegral capacity
+        finalLevel  = if allowed then nextLevel else leakedLevel
+        updatedTime = if allowed then now else lastTime
+    writeTVar stateVar LeakyBucketState { level = finalLevel, lastTime = updatedTime }
     pure allowed
-  liftIO $ putStrLn $ "LeakyBucket Worker: Key=" ++ T.unpack fullKey ++ ", Allowed=" ++ show result
-  liftIO $ putMVar replyVar result
+  atomically $ putTMVar replyVar result
 
 instance CacheStore (InMemoryStore 'TinyLRU) Int IO where
   readStore (TinyLRUStore ref) _prefix key = do
