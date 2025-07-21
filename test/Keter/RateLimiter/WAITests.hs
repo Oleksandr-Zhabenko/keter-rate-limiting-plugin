@@ -69,17 +69,35 @@ tests = testGroup "Rate Limiting Tests"
   , testGroup "Token Bucket Algorithm"
       [ testCase "Allows IPv4 requests below limit" $ testBelowLimit TokenBucket byIP
       , testCase "Blocks IPv4 requests exceeding limit" $ testExceedLimit TokenBucket byIP
+      , testCase "Allows IPv6 requests below limit" $ testBelowLimit TokenBucket byIP
+      , testCase "Blocks IPv6 requests exceeding limit" $ testExceedLimit TokenBucket byIP
+      , testCase "Respects token bucket timing with IPv4" $ testTiming TokenBucket byIP
+      , testCase "Handles x-forwarded-for header for IPv4" $ testXFF TokenBucket byIP
+      , testCase "Handles x-real-ip header for IPv6" $ testRealIP TokenBucket byIP
       , testCase "Handles concurrent requests" $ testConcurrent TokenBucket byIP
+      , testCase "Handles DoS-like concurrency" $ testDoS TokenBucket byIP
       ]
   , testGroup "Leaky Bucket Algorithm"
       [ testCase "Allows IPv4 requests below limit" $ testBelowLimit LeakyBucket byIP
       , testCase "Blocks IPv4 requests exceeding limit" $ testExceedLimit LeakyBucket byIP
+      , testCase "Allows IPv6 requests below limit" $ testBelowLimit LeakyBucket byIP
+      , testCase "Blocks IPv6 requests exceeding limit" $ testExceedLimit LeakyBucket byIP
+      , testCase "Respects leaky bucket timing with IPv4" $ testTiming LeakyBucket byIP
+      , testCase "Handles x-forwarded-for header for IPv4" $ testXFF LeakyBucket byIP
+      , testCase "Handles x-real-ip header for IPv6" $ testRealIP LeakyBucket byIP
       , testCase "Handles concurrent requests" $ testConcurrent LeakyBucket byIP
+      , testCase "Handles DoS-like concurrency" $ testDoS LeakyBucket byIP
       ]
   , testGroup "TinyLRU Algorithm"
       [ testCase "Allows IPv4 requests below limit" $ testBelowLimit TinyLRU byIP
       , testCase "Blocks IPv4 requests exceeding limit" $ testExceedLimit TinyLRU byIP
+      , testCase "Allows IPv6 requests below limit" $ testBelowLimit TinyLRU byIP
+      , testCase "Blocks IPv6 requests exceeding limit" $ testExceedLimit TinyLRU byIP
+      , testCase "Respects TinyLRU timing with IPv4" $ testTiming TinyLRU byIP
+      , testCase "Handles x-forwarded-for header for IPv4" $ testXFF TinyLRU byIP
+      , testCase "Handles x-real-ip header for IPv6" $ testRealIP TinyLRU byIP
       , testCase "Handles concurrent requests" $ testConcurrent TinyLRU byIP
+      , testCase "Handles DoS-like concurrency" $ testDoS TinyLRU byIP
       ]
   ]
 
