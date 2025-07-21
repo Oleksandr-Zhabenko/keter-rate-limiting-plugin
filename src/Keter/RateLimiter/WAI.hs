@@ -33,6 +33,7 @@ import Keter.RateLimiter.CacheWithZone (allowFixedWindowRequest)
 import Data.TinyLRU (allowRequestTinyLRU)
 import System.Clock (TimeSpec, Clock(Monotonic), getTime)
 import Data.Maybe (fromMaybe)
+import Data.Time.Clock.POSIX (getPOSIXTime)
 
 data ThrottleConfig = ThrottleConfig
   { throttleLimit :: Int
@@ -94,9 +95,12 @@ instrument env req = do
         Nothing -> return False
         Just identifier -> case throttleAlgorithm config of
           FixedWindow -> not <$> allowFixedWindowRequest (zscCounterCache caches) zone identifier (throttleLimit config) (throttlePeriod config)
-          SlidingWindow -> do
-            let TimestampStore tvar = cacheStore (zscTimestampCache caches)
-            not <$> SlidingWindow.allowRequest tvar zone identifier (throttlePeriod config) (throttleLimit config)
+          SlidingWindow ->
+            -- Pattern-match to extract the TVar from the timestamp cache:
+            case zscTimestampCache caches of
+              Cache { cacheStore = TimestampStore tvar } ->
+                not <$> SlidingWindow.allowRequest (realToFrac <$> getPOSIXTime)
+                                  tvar zone identifier (throttlePeriod config) (throttleLimit config)
           TokenBucket -> do
             let period = throttlePeriod config
                 limit = throttleLimit config

@@ -98,7 +98,7 @@ class ResettableStore store where
 -- | In-memory store type parameterized by Algorithm.
 data InMemoryStore (a :: Algorithm) where
   CounterStore :: TVar (C.Cache Text Text) -> InMemoryStore 'FixedWindow
-  TimestampStore :: TVar (C.Cache Text Text) -> InMemoryStore 'SlidingWindow
+  TimestampStore :: TVar (StmMap.Map Text [Double]) -> InMemoryStore 'SlidingWindow
   TokenBucketStore :: TVar (StmMap.Map Text TokenBucketEntry) -> InMemoryStore 'TokenBucket
   LeakyBucketStore :: TVar (StmMap.Map Text LeakyBucketEntry) -> InMemoryStore 'LeakyBucket
   TinyLRUStore :: TVar (TinyLRU.TinyLRUCache s) -> InMemoryStore 'TinyLRU
@@ -118,7 +118,10 @@ instance CreateStore 'FixedWindow where
   createStore = createStoreWith CounterStore
 
 instance CreateStore 'SlidingWindow where
-  createStore = createStoreWith TimestampStore
+  createStore = do
+    emptyMap <- atomically (StmMap.new :: STM (StmMap.Map Text [Double]))
+    tvar <- newTVarIO emptyMap
+    pure $ TimestampStore tvar
 
 instance CreateStore 'TokenBucket where
   createStore = do
@@ -265,26 +268,16 @@ instance CacheStore (InMemoryStore 'FixedWindow) Int IO where
         C.insertSTM key jsonTxt cache (Just expiryTimeSpec)
         return newVal
 
-instance CacheStore (InMemoryStore 'SlidingWindow) [Int] IO where
-  readStore (TimestampStore tvar) _prefix key = do
-    cache <- readTVarIO tvar
-    mval <- C.lookup cache key
-    case mval of
-      Nothing -> return Nothing
-      Just txt -> return $ decodeStrict (encodeUtf8 txt)
-  writeStore (TimestampStore tvar) _prefix key val expiresIn = do
-    let bs = encode val
-        strictBs = LBS.toStrict bs
-        jsonTxt = case decodeUtf8' strictBs of
-                    Left _ -> ""
-                    Right txt -> txt
-    expiryTimeSpec <- secondsToTimeSpec expiresIn
-    atomically $ do
-      cache <- readTVar tvar
-      C.insertSTM key jsonTxt cache (Just expiryTimeSpec)
-  deleteStore (TimestampStore tvar) _prefix key = do
-    cache <- readTVarIO tvar
-    C.delete cache key
+instance CacheStore (InMemoryStore 'SlidingWindow) [Double] IO where
+  readStore (TimestampStore tvar) _prefix key = atomically $ do
+    stmMap <- readTVar tvar
+    StmMap.lookup key stmMap
+  writeStore (TimestampStore tvar) _prefix key val _expiresIn = atomically $ do
+    stmMap <- readTVar tvar
+    StmMap.insert val key stmMap
+  deleteStore (TimestampStore tvar) _prefix key = atomically $ do
+    stmMap <- readTVar tvar
+    StmMap.delete key stmMap
 
 instance CacheStore (InMemoryStore 'TokenBucket) TokenBucketState IO where
   readStore (TokenBucketStore tvar) _prefix key = atomically $ do
@@ -339,15 +332,15 @@ startLeakyBucketWorker
   -> IO ()
 startLeakyBucketWorker stateVar queue capacity leakRate fullKey = void . forkIO $ forever $ do
   replyVar <- atomically $ readTQueue queue
-  now <- floor <$> getPOSIXTime
+  now <- realToFrac <$> getPOSIXTime
   result <- atomically $ do
     LeakyBucketState{level, lastTime} <- readTVar stateVar
-    let elapsed     = fromIntegral (now - lastTime)
+    let elapsed     = now - fromIntegral lastTime
         leakedLevel = max 0 (level - elapsed * leakRate)
         nextLevel   = leakedLevel + 1
         allowed     = nextLevel <= fromIntegral capacity
         finalLevel  = if allowed then nextLevel else leakedLevel
-        updatedTime = if allowed then now else lastTime
+        updatedTime = if allowed then round now else lastTime
     writeTVar stateVar LeakyBucketState { level = finalLevel, lastTime = updatedTime }
     pure allowed
   atomically $ putTMVar replyVar result
@@ -385,7 +378,9 @@ instance CacheStore (InMemoryStore 'TinyLRU) Int IO where
 -- | ResettableStore instances
 instance ResettableStore (InMemoryStore a) where
   resetStore (CounterStore tvar) = resetStoreWith tvar
-  resetStore (TimestampStore tvar) = resetStoreWith tvar
+  resetStore (TimestampStore tvar) = atomically $ do
+    stmMap <- readTVar tvar
+    StmMap.reset stmMap
   resetStore (TokenBucketStore tvar) = atomically $ do
     stmMap <- readTVar tvar
     StmMap.reset stmMap
