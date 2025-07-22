@@ -26,7 +26,7 @@ instance FromJSON TokenBucketState where
 
 data LeakyBucketState = LeakyBucketState
   { level      :: Double
-  , lastTime   :: Int
+  , lastTime   :: Double
   } deriving (Show, Eq, Generic)
 
 instance ToJSON LeakyBucketState

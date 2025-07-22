@@ -330,20 +330,21 @@ startLeakyBucketWorker
   -> Double    -- ^ Leak rate (requests drained per second)
   -> Text      -- ^ Key for logging
   -> IO ()
-startLeakyBucketWorker stateVar queue capacity leakRate fullKey = void . forkIO $ forever $ do
-  replyVar <- atomically $ readTQueue queue
-  now <- realToFrac <$> getPOSIXTime
-  result <- atomically $ do
-    LeakyBucketState{level, lastTime} <- readTVar stateVar
-    let elapsed     = now - fromIntegral lastTime
-        leakedLevel = max 0 (level - elapsed * leakRate)
-        nextLevel   = leakedLevel + 1
-        allowed     = nextLevel <= fromIntegral capacity
-        finalLevel  = if allowed then nextLevel else leakedLevel
-        updatedTime = if allowed then round now else lastTime
-    writeTVar stateVar LeakyBucketState { level = finalLevel, lastTime = updatedTime }
-    pure allowed
-  atomically $ putTMVar replyVar result
+startLeakyBucketWorker stateVar queue capacity leakRate fullKey = void . forkIO $ 
+  forever $ do
+    replyVar <- atomically $ readTQueue queue
+    now <- realToFrac <$> getPOSIXTime
+    result <- atomically $ do
+      LeakyBucketState{level,lastTime} <- readTVar stateVar
+      let elapsed     = now - lastTime
+          leakedLevel = max 0 (level - elapsed * leakRate)
+          nextLevel   = leakedLevel + 1
+          allowed     = nextLevel <= fromIntegral capacity
+          -- **FIX:** apply leak even on denial
+          finalLevel  = if allowed then nextLevel else leakedLevel
+      writeTVar stateVar LeakyBucketState{ level = finalLevel, lastTime = now }
+      return allowed
+    atomically $ putTMVar replyVar result
 
 instance CacheStore (InMemoryStore 'TinyLRU) Int IO where
   readStore (TinyLRUStore ref) _prefix key = do

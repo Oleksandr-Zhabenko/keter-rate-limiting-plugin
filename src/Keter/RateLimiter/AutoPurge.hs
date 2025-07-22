@@ -73,7 +73,7 @@ startCustomPurgeTokenBucket
 startCustomPurgeTokenBucket stmMap intervalSeconds ttlSeconds = startCustomPurge
   (\entry -> do
       TokenBucketState _ lastT <- readTVar (tbeState entry)
-      pure lastT)
+      pure (fromIntegral lastT))
   (\key entry -> do
       void $ tryTakeTMVar (tbeWorkerLock entry)
       StmMap.delete key stmMap)
@@ -101,7 +101,7 @@ startCustomPurgeLeakyBucket stmMap intervalSeconds ttlSeconds = startCustomPurge
 -- | Generic purge loop used by both helpers above.
 startCustomPurge
   :: forall entry.
-     (entry -> STM Int)          -- ^ extract last-activity timestamp
+     (entry -> STM Double)          -- ^ extract last-activity timestamp
   -> (Text -> entry -> STM ())   -- ^ Custom delete action (key -> entry -> STM ())
   -> StmMap.Map Text entry
   -> Integer                      -- ^ intervalSeconds
@@ -112,13 +112,13 @@ startCustomPurge getTimestamp deleteAction stmMap intervalSeconds ttlSeconds = d
   forkIO $ forever $ do
     takeMVar purgeSignal
     startTime <- getTime Monotonic
-    now <- floor <$> getPOSIXTime
+    now <- realToFrac <$> getPOSIXTime
     expiredKVs <- atomically $ do
       kvs <- ListT.toList (StmMap.listT stmMap)
       filterM
         (\(_, entry) -> do
             ts <- getTimestamp entry
-            pure (toInteger now - toInteger ts >= ttlSeconds))
+            pure (now - ts >= fromIntegral ttlSeconds))
         kvs
     atomically $ mapM_ (\(k, v) -> deleteAction k v) expiredKVs
     endTime <- getTime Monotonic
