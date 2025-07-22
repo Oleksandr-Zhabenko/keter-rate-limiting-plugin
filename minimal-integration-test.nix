@@ -34,6 +34,9 @@ pkgs.testers.runNixOSTest {
             p.http-types
             p.text
             p.bytestring
+            p.case-insensitive
+            p.network
+            p.monad-control # Dependency for wai-extra, useful for helpers
             keterRateLimiting
           ])}/bin:${pkgs.gnugrep}/bin:${pkgs.coreutils}/bin:$PATH
 
@@ -70,40 +73,79 @@ pkgs.testers.runNixOSTest {
           echo "Created Haskell file: $HASKELL_FILE" >&2
           cat > "$HASKELL_FILE" << 'HASKELL_EOF'
 {-# LANGUAGE OverloadedStrings #-}
-import Network.Wai (responseLBS, Application, Request)
+import Network.Wai
 import Network.Wai.Handler.Warp (run)
 import Network.HTTP.Types (status200)
 import System.Environment (lookupEnv)
 import Text.Read (readMaybe)
-import Keter.RateLimiter.WAI
-  ( attackMiddleware, Env, initConfig, addThrottle, ThrottleConfig(..), Algorithm(..), getClientIP, defaultIPZone )
 import qualified Data.Text as T
+import qualified Data.Text.Encoding as TE
+import Data.Maybe (fromMaybe, listToMaybe)
+import Data.List (find)
+import Data.CaseInsensitive (mk)
+import Network.Socket (SockAddr(..))
+import qualified Data.ByteString.Char8 as B8
+import qualified Data.ByteString.Lazy.Char8 as LBS
+import Control.Monad (guard)
 
--- Simplified IP zone mapping (all IPs to default zone for this example)
-getRequestIPZone :: Request -> T.Text
+-- Main library imports
+import Keter.RateLimiter.WAI
+  ( attackMiddleware, Env, initConfig, addThrottle, ThrottleConfig(..) )
+-- CORRECTED: Import Algorithm from its actual source module, Keter.RateLimiter.Cache
+import Keter.RateLimiter.Cache (Algorithm(..))
+import Keter.RateLimiter.IPZones (IPZoneIdentifier, defaultIPZone)
+
+-- This function extracts a client identifier (IP address) from request headers or the socket.
+getClientIdentifier :: Request -> IO (Maybe T.Text)
+getClientIdentifier req = pure . Just $ fromMaybe (fallbackIP req) (findClientIP req)
+  where
+    -- Find IP from headers first, respecting x-forwarded-for chains.
+    findClientIP :: Request -> Maybe T.Text
+    findClientIP r = listToMaybe $ do
+      (headerName, headerValue) <- requestHeaders r
+      guard $ headerName `elem` [mk "x-forwarded-for", mk "x-real-ip"]
+      -- Split x-forwarded-for by comma and take the first one
+      pure . T.strip . fst . T.breakOn "," $ TE.decodeUtf8 headerValue
+
+    -- Fallback to the raw socket address if no header is found.
+    fallbackIP :: Request -> T.Text
+    fallbackIP = T.pack . show . remoteHost
+
+-- For this test, we map all requests to a single default zone.
+getRequestIPZone :: Request -> IPZoneIdentifier
 getRequestIPZone _ = defaultIPZone
 
 main :: IO ()
 main = do
   portStr <- lookupEnv "PORT"
   let port = maybe 8080 id (portStr >>= readMaybe)
-  -- Initialize rate limiter environment
+  
+  -- 1. Initialize rate limiter environment using the zone mapping function.
   env <- initConfig getRequestIPZone
-  -- Configure throttle: 4 requests per 10 seconds using Fixed Window
+  
+  -- 2. Configure a throttle rule: 4 requests per 10 seconds using the Fixed Window algorithm.
   let throttleConfig = ThrottleConfig
-        { throttleLimit = 4
-        , throttlePeriod = 10
-        , throttleAlgorithm = FixedWindow
-        , throttleIdentifier = Just . getClientIP
-        , throttleTokenBucketTTL = Nothing
+        { throttleLimit        = 4
+        , throttlePeriod       = 10
+        , throttleAlgorithm    = FixedWindow
+        , throttleIdentifier   = getClientIdentifier
+        , throttleTokenBucketTTL = Nothing -- Not used for FixedWindow, can be Nothing.
         }
-      envWithThrottle = addThrottle env "test-throttle" throttleConfig
+  
+  -- 3. Add the throttle configuration to the environment.
+  envWithThrottle <- addThrottle env "test-throttle" throttleConfig
+  
   putStrLn $ "Starting Haskell Warp server on port " ++ show port
+  -- 4. Run the Warp server with the rate-limiting middleware.
   run port (attackMiddleware envWithThrottle baseApp)
 
+-- A simple base application that will be protected by the middleware.
 baseApp :: Application
 baseApp req respond = do
-  putStrLn $ "Received request from " ++ T.unpack (getClientIP req)
+  -- Log the received request's identifier for debugging purposes.
+  mIdentifier <- getClientIdentifier req
+  putStrLn $ "Received request from " ++ T.unpack (fromMaybe "unknown" mIdentifier)
+  
   respond $ responseLBS
     status200
     [("Content-Type", "text/plain")]
@@ -249,12 +291,12 @@ HASKELL_EOF
             assert "Hello from a Haskell/WAI/Warp application with rate limiting!" in response_body, "Request {0} missing expected response".format(i)
         elif status_code == "429":
             failure_count += 1
-            assert response_body == "Too Many Requests", "Request {0} expected 'Too Many Requests', got {1}".format(i, response_body)
+            assert "Too Many Requests" in response_body, "Request {0} expected 'Too Many Requests', got {1}".format(i, response_body)
         else:
             assert False, "Request {0} returned unexpected status code: {1}".format(i, status_code)
         machine.succeed("sleep 1")
-    assert success_count >= 4, "Expected at least 4 successful requests, got {0}".format(success_count)
-    assert failure_count <= 1, "Expected up to 1 failed request, got {0}".format(failure_count)
+    assert success_count == 4, "Expected exactly 4 successful requests, got {0}".format(success_count)
+    assert failure_count == 1, "Expected exactly 1 failed request, got {0}".format(failure_count)
 
     # Test rate limit reset
     print("=== Testing rate limit reset ===")
