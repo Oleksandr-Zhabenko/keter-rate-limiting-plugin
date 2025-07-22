@@ -157,15 +157,22 @@ main = do
                 else pure Nothing -- Skip this throttle for other paths.
             , throttleTokenBucketTTL = Nothing
             })
-        -- FIXED: Apply reset-throttle only to specific paths for testing
+        -- FIXED: Increased period and limit for more reliable testing
         , ("reset-throttle", ThrottleConfig
             { throttleLimit = 1
-            , throttlePeriod = 1
+            , throttlePeriod = 3  -- Increased from 1 to 3 seconds for more reliable testing
             , throttleAlgorithm = FixedWindow
-            , throttleIdentifier = \req ->
-                if T.isPrefixOf "/reset_test" (TE.decodeUtf8 $ rawPathInfo req)
-                then getClientIdentifier req
-                else pure Nothing -- Skip this throttle for other paths
+            , throttleIdentifier = \req -> do
+                let path = TE.decodeUtf8 $ rawPathInfo req
+                putStrLn $ "Reset throttle checking path: " ++ T.unpack path
+                if T.isPrefixOf "/reset_test" path
+                then do
+                    putStrLn "Reset throttle ACTIVE for this request"
+                    identifier <- getClientIdentifier req
+                    pure $ fmap (<> ":reset") identifier  -- Add unique suffix
+                else do
+                    putStrLn "Reset throttle SKIPPED for this request"
+                    pure Nothing -- Skip this throttle for other paths
             , throttleTokenBucketTTL = Nothing
             })
         -- Add a zone-specific throttle for IP isolation testing
@@ -190,7 +197,8 @@ main = do
 
 baseApp :: Application
 baseApp req respond = do
-  putStrLn $ "Received request from " ++ T.unpack (getClientIPString req)
+  let path = TE.decodeUtf8 $ rawPathInfo req
+  putStrLn $ "Received request from " ++ T.unpack (getClientIPString req) ++ " to path: " ++ T.unpack path
   respond $ responseLBS
     status200
     [("Content-Type", "text/plain")]
@@ -357,16 +365,43 @@ HASKELL_EOF
         machine.succeed("sleep 0.5")
     assert home_success >= 2, "Expected at least 2 successful /home requests, got {0}".format(home_success)
 
-    # Test time-based reset throttle (1 request per 1 second, only for /reset_test)
+    # FIXED: Test time-based reset throttle with better timing and debugging
     print("=== Testing time-based reset throttle ===")
-    machine.succeed("sleep 15")  # Ensure all throttles reset
-    print("First /reset_test request should succeed")
-    output = machine.succeed("curl -s --write-out '%{http_code}' http://localhost:${toString port}/reset_test")
+    machine.succeed("sleep 20")  # Longer wait to ensure all throttles reset
+    
+    # Check that regular paths work before testing reset path
+    print("Verifying regular path works before reset test")
+    output = machine.succeed("curl -s --write-out '%{http_code}' http://localhost:${toString port}/regular")
     status_code = output[-3:].strip()
+    assert status_code == "200", "Regular path failed before reset test, got {0}".format(status_code)
+    
+    print("First /reset_test request should succeed")
+    status, output = machine.execute("curl -s --write-out '%{http_code}' http://localhost:${toString port}/reset_test")
+    status_code = output[-3:].strip()
+    
+    # Debug: Check the Haskell app logs to see what happened
+    print("=== Checking app logs for reset test debugging ===")
+    _, log_output = machine.execute("journalctl -u keter.service --no-pager | tail -10")
+    print("Recent Keter logs: {0}".format(log_output))
+    
+    if status_code != "200":
+        print("ERROR: First reset request failed with status {0}".format(status_code))
+        print("Response body: {0}".format(output[:-3]))
+        # Let's try a few more diagnostic requests
+        print("=== Diagnostic requests ===")
+        machine.succeed("sleep 5")  # Wait a bit more
+        status2, output2 = machine.execute("curl -s --write-out '%{http_code}' http://localhost:${toString port}/reset_test")
+        print("Second attempt status: {0}".format(output2[-3:].strip()))
+        
+        # Check if any other throttles might be interfering
+        print("Testing if other throttles are interfering:")
+        status3, output3 = machine.execute("curl -s --write-out '%{http_code}' http://localhost:${toString port}/other_path")
+        print("Other path status: {0}".format(output3[-3:].strip()))
+    
     assert status_code == "200", "First reset request did not return 200 OK, got {0}".format(status_code)
     
-    print("Second /reset_test request should fail due to 1 req/sec limit")
-    exit_code, output = machine.execute("curl -s --write-out '%{http_code}' http://localhost:${toString port}/reset_test")
+    print("Second /reset_test request should fail due to throttle")
+    status, output = machine.execute("curl -s --write-out '%{http_code}' http://localhost:${toString port}/reset_test")
     status_code = output[-3:].strip()
     assert status_code == "429", "Second reset request did not return 429, got {0}".format(status_code)
     
@@ -376,7 +411,7 @@ HASKELL_EOF
     status_code = output[-3:].strip()
     assert status_code == "200", "Regular path affected by reset throttle, got {0}".format(status_code)
     
-    machine.succeed("sleep 2")  # Wait for reset period + buffer
+    machine.succeed("sleep 4")  # Wait for reset period (3s) + buffer
     print("Third /reset_test request after reset should succeed")
     output = machine.succeed("curl -s --write-out '%{http_code}' http://localhost:${toString port}/reset_test")
     status_code = output[-3:].strip()
