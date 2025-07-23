@@ -3,9 +3,9 @@
 {-|
 Module      : Keter.RateLimiter.IPZonesTests
 Description : Tests for IP-based zoning and cache management.
-Copyright   : (c) 2025 Acme Inc.
+Copyright   : (c) 2025 Oleksandr Zhabenko
 License     : MIT
-Maintainer  : maintainer@example.com
+Maintainer  : oleksandr.zhabenko@yahoo.com
 Stability   : experimental
 Portability : POSIX
 

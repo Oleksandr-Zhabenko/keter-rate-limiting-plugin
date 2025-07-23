@@ -4,9 +4,9 @@
 {-|
 Module      : Keter.RateLimiter.WAITests
 Description : Comprehensive WAI middleware tests for various rate-limiting algorithms.
-Copyright   : (c) 2025 Acme Inc.
+Copyright   : (c) 2025 Oleksandr Zhabenko
 License     : MIT
-Maintainer  : maintainer@example.com
+Maintainer  : oleksandr.zhabenko@yahoo.com
 Stability   : experimental
 Portability : POSIX
 
