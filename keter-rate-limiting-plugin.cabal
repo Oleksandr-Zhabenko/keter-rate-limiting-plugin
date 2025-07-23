@@ -78,6 +78,7 @@ test-suite keter-rate-limiting-plugin-test
     main-is:          Main.hs
     other-modules:   
         Keter.RateLimiter.Cache.PurgeTests
+        Keter.RateLimiter.LeakyBucketTests
         Keter.RateLimiter.IPZonesTests
         Keter.RateLimiter.LeakyBucketStateTests
         Keter.RateLimiter.NotificationTests

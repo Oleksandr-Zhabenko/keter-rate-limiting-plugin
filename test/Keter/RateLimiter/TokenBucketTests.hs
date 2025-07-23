@@ -1,4 +1,31 @@
-module Keter.RateLimiter.TokenBucketTests where
+{-|
+Module      : Keter.RateLimiter.TokenBucketTests
+Description : Integration tests for the Token Bucket rate-limiting algorithm.
+Copyright   : (c) 2025 Oleksandr Zhabenko
+License     : MIT
+Maintainer  : oleksandr.zhabenko@yahoo.com
+Stability   : stable
+Portability : portable
+
+This module contains integration tests for the Token Bucket algorithm,
+verifying its behavior under various conditions such as rapid bursts,
+long delays, high load, and edge cases like zero capacity.
+-}
+module Keter.RateLimiter.TokenBucketTests (
+  -- * Main Entry
+  main
+, tests
+  -- * Test Groups
+, testPredictableTiming
+, testScenarios
+, testStress
+, testEdgeCases
+  -- * Helpers
+, mockApp
+, mkIPv4Request
+, testGetRequestIPZone
+, assertStatus
+) where
 
 import Test.Tasty
 import Test.Tasty.HUnit
@@ -9,32 +36,37 @@ import qualified Data.Text as Text
 import qualified Data.ByteString.Lazy as LBS
 import Network.Wai
 import Network.Wai.Test (SRequest(..), SResponse, simpleStatus, runSession, srequest, Session)
-import Network.HTTP.Types (status200, status429, Status, statusCode)
+import Network.HTTP.Types (status200, status429, statusCode)
 import Network.Socket (SockAddr(..), tupleToHostAddress)
 import Data.CaseInsensitive (mk)
 import qualified Data.Text.Encoding as TE
 import Keter.RateLimiter.RequestUtils
-import Keter.RateLimiter.WAI (ThrottleConfig(..), attackMiddleware, addThrottle, initConfig, Env)
+import Keter.RateLimiter.WAI (ThrottleConfig(..), attackMiddleware, addThrottle, initConfig)
 import Keter.RateLimiter.Cache (Algorithm(..))
 import Keter.RateLimiter.IPZones (defaultIPZone)
 
--- Mock application and helper functions
+-- | A mock WAI 'Application' that always returns a 200 OK response.
 mockApp :: Application
 mockApp _ respond = respond $ responseLBS status200 [] (LBS.fromStrict $ TE.encodeUtf8 (Text.pack "OK"))
 
+-- | Creates a mock IPv4 'Request' for testing.
+-- The request includes an 'x-real-ip' header for consistent IP identification.
 mkIPv4Request :: Request
 mkIPv4Request = defaultRequest
   { remoteHost = SockAddrInet 0 (tupleToHostAddress (127, 0, 0, 1))
   , requestHeaders = [(mk (TE.encodeUtf8 (Text.pack "x-real-ip")), TE.encodeUtf8 (Text.pack "127.0.0.1"))]
   }
 
+-- | A test-specific helper to determine the IP zone for a request.
+-- For these tests, it always returns the 'defaultIPZone'.
 testGetRequestIPZone :: Request -> Text.Text
 testGetRequestIPZone _ = defaultIPZone
 
--- Test suite
+-- | Main entry point to run the Token Bucket tests independently.
 main :: IO ()
 main = defaultMain tests
 
+-- | The main 'TestTree' for the Token Bucket algorithm.
 tests :: TestTree
 tests = testGroup "Token Bucket Tests"
   [ testPredictableTiming
@@ -43,7 +75,7 @@ tests = testGroup "Token Bucket Tests"
   , testEdgeCases
   ]
 
--- Modified existing tests with predictable timing
+-- | Tests focused on verifying the timing and basic functionality of the token bucket.
 testPredictableTiming :: TestTree
 testPredictableTiming = testGroup "Predictable Timing Tests"
   [ testCase "Basic token bucket test" $ do
@@ -75,13 +107,13 @@ testPredictableTiming = testGroup "Predictable Timing Tests"
             result1 <- srequest $ SRequest mkIPv4Request LBS.empty
             result2 <- srequest $ SRequest mkIPv4Request LBS.empty
             result3 <- srequest $ SRequest mkIPv4Request LBS.empty
-            liftIO $ assertEqual "First two requests succeed, third fails" 
+            liftIO $ assertEqual "First two requests succeed, third fails"
               [status200, status200, status429]
               (map simpleStatus [result1, result2, result3])
       runSession session app
   ]
 
--- Additional scenario tests
+-- | Tests covering various real-world usage scenarios.
 testScenarios :: TestTree
 testScenarios = testGroup "Scenario Tests"
   [ testCase "Rapid burst of requests" $ do
@@ -143,7 +175,7 @@ testScenarios = testGroup "Scenario Tests"
       runSession session app
   ]
 
--- Stress testing
+-- | Tests for behavior under high concurrent load.
 testStress :: TestTree
 testStress = testGroup "Stress Tests"
   [ testCase "High load stress test" $ do
@@ -167,7 +199,7 @@ testStress = testGroup "Stress Tests"
       runSession session app
   ]
 
--- Edge case unit tests
+-- | Tests for edge cases in throttle configuration.
 testEdgeCases :: TestTree
 testEdgeCases = testGroup "Edge Case Tests"
   [ testCase "Bucket capacity of 0" $ do
@@ -246,6 +278,9 @@ testEdgeCases = testGroup "Edge Case Tests"
       runSession session app
   ]
 
--- Helper function for status assertions
-assertStatus :: Int -> SResponse -> Session ()
+-- | A helper assertion to check the status code of a response.
+assertStatus
+  :: Int        -- ^ The expected status code.
+  -> SResponse  -- ^ The response from the WAI test session.
+  -> Session ()
 assertStatus expected response = liftIO $ assertEqual ("Expected status " ++ show expected) expected (statusCode $ simpleStatus response)

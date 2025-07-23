@@ -1,5 +1,24 @@
-{-# LANGUAGE DataKinds, FlexibleContexts, GADTs, OverloadedStrings, RankNTypes, TypeApplications, ScopedTypeVariables #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE GADTs #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
+{-|
+Module      : TinyLRUTests
+Description : Test suite for the TinyLRU cache implementation using tasty and tasty-hunit
+Copyright   : (c) 2025 Oleksandr Zhabenko
+License     : MIT
+Maintainer  : oleksandr.zhabenko@yahoo.com
+Stability   : experimental
+Portability : POSIX
+
+This module provides a comprehensive suite of unit tests for the 'TinyLRUCache' data structure.
+It verifies correctness, eviction policies, TTL behavior, and integration with the rate-limiter's
+unified cache interface. It also includes concurrency tests to validate thread safety.
+-}
 module TinyLRUTests where
 
 import Test.Tasty
@@ -11,50 +30,72 @@ import qualified Data.ByteString as BS
 import Data.Aeson (decodeStrict)
 import System.Clock (TimeSpec(..), Clock(Monotonic), getTime)
 import Data.TinyLRU
-import Keter.RateLimiter.Cache (Algorithm(..), Cache, InMemoryStore(..), newCache, createInMemoryStore, readCache, writeCache, deleteCache, cacheStore)
-import Keter.RateLimiter.CacheWithZone (readCacheWithZone, writeCacheWithZone, deleteCacheWithZone)
+import Keter.RateLimiter.Cache
+  ( Algorithm(..)
+  , Cache
+  , InMemoryStore(..)
+  , newCache
+  , createInMemoryStore
+  , readCache
+  , writeCache
+  , deleteCache
+  , cacheStore
+  )
+import Keter.RateLimiter.CacheWithZone
+  ( readCacheWithZone
+  , writeCacheWithZone
+  , deleteCacheWithZone
+  )
 import Control.Monad
 import Control.Concurrent (threadDelay)
 import qualified StmContainers.Map as Map
 import System.Random (randomRIO)
 import Data.Maybe (isJust)
 
--- Helper to create a TinyLRUCache in IO
+-- | Initializes a new 'TinyLRUCache' with the given capacity.
 createTinyLRU :: Int -> IO (TinyLRUCache s)
 createTinyLRU capacity = atomically $ initTinyLRU capacity
 
--- Helper to create InMemoryStore 'TinyLRU
-createTinyLRUStore :: IO (InMemoryStore 'Keter.RateLimiter.Cache.TinyLRU)
+-- | Creates an in-memory store for the 'TinyLRU' algorithm.
+createTinyLRUStore :: IO (InMemoryStore 'TinyLRU)
 createTinyLRUStore = TinyLRUStore <$> (atomically $ newTVar =<< initTinyLRU 3)
 
--- Helper to create a Cache for TinyLRU
-newTinyLRUCache :: IO (Cache (InMemoryStore 'Keter.RateLimiter.Cache.TinyLRU))
+-- | Constructs a typed 'Cache' with the 'TinyLRU' algorithm.
+newTinyLRUCache :: IO (Cache (InMemoryStore 'TinyLRU))
 newTinyLRUCache = do
-  store <- createInMemoryStore @'Keter.RateLimiter.Cache.TinyLRU
-  return $ newCache Keter.RateLimiter.Cache.TinyLRU store
+  store <- createInMemoryStore @'TinyLRU
+  return $ newCache TinyLRU store
 
--- Helper to work with InMemoryStore without unwrapping
--- Instead of unwrapping, we provide a function that works with the store directly
-withTinyLRUStore :: InMemoryStore 'Keter.RateLimiter.Cache.TinyLRU -> (forall s. TVar (TinyLRUCache s) -> STM a) -> STM a
+-- | Safely accesses the internal 'TVar' from an 'InMemoryStore' without unwrapping it directly.
+withTinyLRUStore
+  :: InMemoryStore 'TinyLRU
+  -> (forall s. TVar (TinyLRUCache s) -> STM a)
+  -> STM a
 withTinyLRUStore (TinyLRUStore tvarCache) action = action tvarCache
 
--- Placeholder for allowRequest function - replace with actual implementation
-allowRequest :: Cache (InMemoryStore 'Keter.RateLimiter.Cache.TinyLRU) -> String -> Int -> Int -> IO Bool
+-- | Simulates an incoming request using the TinyLRU-based rate limiter.
+-- Returns whether the request is allowed under the given limit and period.
+allowRequest
+  :: Cache (InMemoryStore 'TinyLRU)
+  -> String   -- ^ Key (e.g. user identifier)
+  -> Int      -- ^ Limit
+  -> Int      -- ^ Period (seconds)
+  -> IO Bool
 allowRequest cache key limit period = do
   now <- getTime Monotonic
   let textKey = pack key
       store = cacheStore cache
-  -- Use withTinyLRUStore instead of unwrapTinyLRUStore
   atomically $ withTinyLRUStore store $ \tvarCache -> do
     actualCache <- readTVar tvarCache
     allowRequestTinyLRU now actualCache textKey limit period
 
--- Helper to advance time
+-- | Advances a 'TimeSpec' by a given number of seconds.
 advanceTime :: TimeSpec -> Int -> TimeSpec
 advanceTime (TimeSpec secs nsecs) seconds =
   TimeSpec (secs + fromIntegral seconds) nsecs
 
--- Helper to check LRU list consistency
+-- | Validates the internal consistency of the LRU list (double-linked list).
+-- Ensures that pointers are bidirectionally correct and size matches map.
 checkListConsistency :: TinyLRUCache s -> STM ()
 checkListConsistency cache = do
   list <- readTVar (lruList cache)
@@ -81,25 +122,39 @@ checkListConsistency cache = do
     Nothing -> unless (cacheSize == 0) $
       error "Empty tail with non-empty cache"
 
--- Helper to check consistency for wrapped cache
-checkWrappedListConsistency :: Cache (InMemoryStore 'Keter.RateLimiter.Cache.TinyLRU) -> STM ()
+-- | Convenience wrapper to validate consistency of a wrapped 'TinyLRUCache'.
+checkWrappedListConsistency :: Cache (InMemoryStore 'TinyLRU) -> STM ()
 checkWrappedListConsistency cache = do
   let store = cacheStore cache
-  -- Use withTinyLRUStore instead of unwrapTinyLRUStore
   withTinyLRUStore store $ \tvarCache -> do
     actualCache <- readTVar tvarCache
     checkListConsistency actualCache
 
--- Helper function to create a Show instance for TVar (LRUNode s)
--- We can't show the actual TVar, so we'll show a placeholder
+-- | Safe placeholder for printing a 'TVar' without leaking memory content.
 showTVar :: TVar a -> String
 showTVar _ = "<TVar>"
 
--- Helper to convert Maybe (TVar (LRUNode s)) to String for assertions
+-- | Pretty-print representation of optional 'TVar' references for assertions.
 showMaybeTVar :: Maybe (TVar (LRUNode s)) -> String
 showMaybeTVar Nothing = "Nothing"
 showMaybeTVar (Just _) = "Just <TVar>"
 
+-- | The full test suite for TinyLRU-based rate limiting and cache behavior.
+--
+-- Includes:
+--
+--   * Cache initialization
+--   * TTL expiration
+--   * LRU eviction
+--   * Edge cases (empty keys, long keys, 0/negative TTL)
+--   * Concurrent access and reset
+--   * Integration with generic cache interfaces (read/write/delete)
+--   * Zone-aware key operations
+--   * Inconsistent or corrupted JSON data handling
+--
+-- Use this test tree in your project's test runner:
+--
+-- > defaultMain TinyLRUTests.tests
 tests :: TestTree
 tests = testGroup "TinyLRU Tests"
   [ testCase "Initialize TinyLRU" $ do

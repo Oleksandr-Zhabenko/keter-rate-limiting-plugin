@@ -1,4 +1,3 @@
--- Keter.RateLimiter.IPZones.hs
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE TypeApplications #-}
@@ -11,16 +10,31 @@ License     : MIT
 Maintainer  : oleksandr.zhabenko@yahoo.com
 Stability   : stable
 Portability : portable
+
+This module provides zone-based isolation for rate-limiting caches. It enables
+each IP zone to maintain its own independent instances of rate-limiting
+algorithms (e.g., token bucket, leaky bucket, sliding window, etc.). This
+ensures multi-tenant systems can rate-limit different clients or groups in
+isolation.
+
+The primary structure here is `ZoneSpecificCaches`, which contains multiple
+caches per zone. Utility functions allow dynamic creation, reset, and
+lookup of caches for specific zones.
+
 -}
 
 module Keter.RateLimiter.IPZones
-  ( IPZoneIdentifier
+  ( -- * IP Zone Identification
+    IPZoneIdentifier
   , defaultIPZone
+    -- * Zone-specific Caches
   , ZoneSpecificCaches(..)
   , createZoneCaches
+  , newZoneSpecificCaches
+    -- * Cache Management
   , resetSingleZoneCaches
   , resetZoneCache
-  , newZoneSpecificCaches
+    -- * Address to Zone Resolution
   , sockAddrToIPZone 
   ) where
 
@@ -43,23 +57,46 @@ import Control.Concurrent.STM (newTVarIO, atomically, readTVar)
 import qualified StmContainers.Map as StmMap
 import Debug.Trace (traceM)
 
--- | Type alias representing an identifier for an IP zone, supporting IPv4 and IPv6 addresses.
+--------------------------------------------------------------------------------
+
+-- | Type alias representing an identifier for an IP zone.
+--
+-- This is used as a logical namespace or grouping key for assigning and isolating rate limiters.
+-- Examples: `"default"`, `"zone-a"`, or `"192.168.1.0/24"`.
 type IPZoneIdentifier = Text
 
 -- | The default IP zone identifier used when no specific zone is assigned.
+--
+-- Used as a fallback when no zone-specific routing is determined.
 defaultIPZone :: IPZoneIdentifier
 defaultIPZone = "default"
 
 -- | A collection of caches dedicated to a specific IP zone.
+--
+-- Each cache corresponds to one of the supported rate-limiting algorithms,
+-- maintained independently per zone.
 data ZoneSpecificCaches = ZoneSpecificCaches
   { zscCounterCache     :: Cache (InMemoryStore 'FixedWindow)
+    -- ^ Cache for Fixed Window counters.
   , zscTimestampCache   :: Cache (InMemoryStore 'SlidingWindow)
+    -- ^ Cache for timestamp lists used in Sliding Window.
   , zscTokenBucketCache :: Cache (InMemoryStore 'TokenBucket)
-  , zscLeakyBucketCache :: Cache (InMemoryStore 'LeakyBucket) 
+    -- ^ Token Bucket cache.
+  , zscLeakyBucketCache :: Cache (InMemoryStore 'LeakyBucket)
+    -- ^ Leaky Bucket queue-based cache.
   , zscTinyLRUCache     :: Cache (InMemoryStore 'TinyLRU)
+    -- ^ Optional auxiliary LRU cache.
   }
 
 -- | Create a new set of caches for a single IP zone.
+--
+-- Each algorithm receives its own store. For `LeakyBucket`, a background
+-- cleanup thread is also started to remove inactive entries periodically.
+--
+-- == Example
+--
+-- > zoneCaches <- createZoneCaches
+-- > cacheReset (zscTokenBucketCache zoneCaches)
 createZoneCaches :: IO ZoneSpecificCaches
 createZoneCaches = do
   counterStore <- createInMemoryStore @'FixedWindow
@@ -81,7 +118,19 @@ createZoneCaches = do
     , zscTinyLRUCache     = newCache TinyLRU tinyLRUStore
     }
 
+-- | Alias for 'createZoneCaches'.
+--
+-- Useful for more readable builder-based usage or factory patterns.
+newZoneSpecificCaches :: IO ZoneSpecificCaches
+newZoneSpecificCaches = createZoneCaches
+
 -- | Reset all caches within the given 'ZoneSpecificCaches'.
+--
+-- Clears all internal state, including token counts, timestamps, and queues.
+--
+-- == Example
+--
+-- > resetSingleZoneCaches zoneCaches
 resetSingleZoneCaches :: ZoneSpecificCaches -> IO ()
 resetSingleZoneCaches zsc = do
   cacheReset (zscCounterCache zsc)
@@ -91,6 +140,12 @@ resetSingleZoneCaches zsc = do
   cacheReset (zscTinyLRUCache zsc)
 
 -- | Reset a single cache for a specific algorithm within the given 'ZoneSpecificCaches'.
+--
+-- This is useful when only one type of rate limiter needs a reset.
+--
+-- == Example
+--
+-- > resetZoneCache zoneCaches TokenBucket
 resetZoneCache :: ZoneSpecificCaches -> Algorithm -> IO ()
 resetZoneCache zsc algorithm = case algorithm of
   FixedWindow   -> cacheReset (zscCounterCache zsc)
@@ -99,11 +154,16 @@ resetZoneCache zsc algorithm = case algorithm of
   LeakyBucket   -> cacheReset (zscLeakyBucketCache zsc)
   TinyLRU       -> cacheReset (zscTinyLRUCache zsc)
 
--- | Alias for 'createZoneCaches'.
-newZoneSpecificCaches :: IO ZoneSpecificCaches
-newZoneSpecificCaches = createZoneCaches
-
--- | Convert a socket address to an IP zone identifier
+-- | Convert a socket address into an IP zone identifier.
+--
+-- IPv4 addresses are rendered using `fromHostAddress`. IPv6 addresses are
+-- expanded and zero-padded for consistency. Any unknown or unsupported
+-- address formats fall back to the 'defaultIPZone'.
+--
+-- == Example
+--
+-- > zone <- sockAddrToIPZone (SockAddrInet 80 0x7f000001)
+-- > print zone  -- "127.0.0.1"
 sockAddrToIPZone :: SockAddr -> IO Text
 sockAddrToIPZone (SockAddrInet _ hostAddr) = do
   let ip = fromHostAddress hostAddr

@@ -1,6 +1,21 @@
 {-# LANGUAGE OverloadedStrings, NumericUnderscores #-}
 
-module Keter.RateLimiter.Cache.PurgeTests where
+{-|
+Module      : Keter.RateLimiter.Cache.PurgeTests
+Description : Tests for the background cache purging mechanism.
+Copyright   : (c) 2025 Oleksandr Zhabenko
+License     : MIT
+Maintainer  : oleksandr.zhabenko@yahoo.com
+Stability   : stable
+Portability : portable
+
+This module contains tests to verify that the automatic background purging
+of expired keys in the cache works as expected.
+-}
+module Keter.RateLimiter.Cache.PurgeTests (
+  -- * Test Suite
+  testBackgroundPurge
+) where
 
 import Test.Tasty
 import Test.Tasty.HUnit
@@ -10,15 +25,16 @@ import Data.Text (Text)
 import System.Clock (TimeSpec(..))
 import Keter.RateLimiter.Cache (startAutoPurge) -- Import your module
 
+-- | A test suite for background cache purging.
 testBackgroundPurge :: TestTree
 testBackgroundPurge = testCase "Background purge removes expired keys" $ do
-  -- Create cache with no default TTL 
+  -- Create cache with no default TTL
   cache <- C.newCache Nothing :: IO (C.Cache Text Text)
 
   -- Create a proper TimeSpec for 2 seconds (2 seconds = 2 * 10^9 nanoseconds)
   let ttlSeconds = 2
   let ttlTimeSpec = TimeSpec ttlSeconds 0  -- 2 seconds, 0 nanoseconds
-  
+
   -- Insert a key with proper TTL
   C.insert' cache (Just ttlTimeSpec) "expired-key" "value"
 

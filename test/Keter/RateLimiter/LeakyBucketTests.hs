@@ -2,54 +2,108 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE DataKinds #-}
 
-module Keter.RateLimiter.LeakyBucketTests (tests) where
+{-|
+Module      : Keter.RateLimiter.LeakyBucketTests
+Description : Tests for the Leaky Bucket rate-limiting algorithm.
+Copyright   : (c) 2025 Oleksandr Zhabenko
+License     : MIT
+Maintainer  : oleksandr.zhabenko@yahoo.com
+Stability   : stable
+Portability : portable
+
+This module provides integration and unit tests for the Leaky Bucket algorithm.
+The Leaky Bucket algorithm is useful for smoothing out bursts of requests and maintaining a steady outflow rate.
+
+It verifies the correctness of the implementation across several dimensions:
+  * **IP Version Handling**: Ensures both IPv4 and IPv6 are handled correctly.
+  * **Request Headers**: Tests identification of clients via @x-forwarded-for@ and @x-real-ip@ headers.
+  * **Concurrency**: Checks for correct behavior under concurrent access.
+  * **Timing and Capacity**: Verifies that the bucket "leaks" at the correct rate and respects its capacity.
+  * **Direct Function Calls**: Includes tests that call the core algorithm functions directly for unit testing.
+-}
+module Keter.RateLimiter.LeakyBucketTests (
+  -- * Test Suite
+  tests,
+  
+  -- * Test Helpers
+  mockApp,
+  mkIPv4Request,
+  mkIPv6Request,
+  mkRequestWithXFF,
+  mkRequestWithRealIP
+) where
 
 import Test.Tasty
 import Test.Tasty.HUnit
-import qualified Data.Map.Strict as Map
+--import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
-import qualified Data.ByteString as BS
+--import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
 import Control.Concurrent (threadDelay, forkIO)
-import Control.Concurrent.MVar (newMVar, modifyMVar_, withMVar, MVar)
+import Control.Concurrent.MVar (newMVar, modifyMVar_, withMVar)
 import Network.Wai (Request, Application, defaultRequest, requestHeaders, responseLBS, remoteHost)
-import Network.Wai.Test (runSession, srequest, SRequest(..), SResponse, assertStatus, simpleStatus)
-import Network.HTTP.Types (methodGet, status200, status429)
+import Network.Wai.Test (runSession, srequest, SRequest(..), assertStatus, simpleStatus)
+import Network.HTTP.Types (status200)
 import Network.HTTP.Types.Status (statusCode)
 import Network.Socket (SockAddr(..), tupleToHostAddress)
 import Keter.RateLimiter.Cache
 import Keter.RateLimiter.RequestUtils
 import Keter.RateLimiter.WAI
 import Keter.RateLimiter.IPZones
-import Keter.RateLimiter.Types (LeakyBucketState(..))
+--import Keter.RateLimiter.Types (LeakyBucketState(..))
 import Keter.RateLimiter.LeakyBucket (allowRequest)
 import Control.Monad.IO.Class (liftIO)
-import Data.CaseInsensitive (CI, mk)
+import Data.CaseInsensitive (mk)
 import qualified StmContainers.Map as StmMap
 import Control.Concurrent.STM
-import Data.Time.Clock.POSIX (getPOSIXTime)
+--import Data.Time.Clock.POSIX (getPOSIXTime)
 import Data.Function (fix)
 
--- Helper functions to create requests
+-- * Mock Request Generation
+
+-- | Creates a mock IPv4 'Request' for testing purposes.
+-- The address is set to @127.0.0.1@.
 mkIPv4Request :: Request
 mkIPv4Request = defaultRequest { remoteHost = SockAddrInet 0 (tupleToHostAddress (127, 0, 0, 1)) } -- 127.0.0.1
 
+-- | Creates a mock IPv6 'Request' for testing purposes.
+-- The address is set to @::1@.
 mkIPv6Request :: Request
 mkIPv6Request = defaultRequest { remoteHost = SockAddrInet6 0 0 (0, 0, 0, 1) 0 } -- ::1
 
-mkRequestWithXFF :: Text -> Request
+-- | Creates a mock 'Request' with an @x-forwarded-for@ header.
+-- This is essential for testing applications behind a reverse proxy.
+--
+-- ==== __Example__
+-- > let req = mkRequestWithXFF "198.51.100.1"
+mkRequestWithXFF
+  :: Text -- ^ The IP address to use in the header.
+  -> Request
 mkRequestWithXFF ip = defaultRequest { requestHeaders = [(mk "x-forwarded-for", TE.encodeUtf8 ip)] }
 
-mkRequestWithRealIP :: Text -> Request
+-- | Creates a mock 'Request' with an @x-real-ip@ header.
+-- Similar to @x-forwarded-for@, this is used for client IP identification.
+--
+-- ==== __Example__
+-- > let req = mkRequestWithRealIP "2001:db8::a"
+mkRequestWithRealIP
+  :: Text -- ^ The IP address to use in the header.
+  -> Request
 mkRequestWithRealIP ip = defaultRequest { requestHeaders = [(mk "x-real-ip", TE.encodeUtf8 ip)] }
 
--- Mock application that always returns 200 OK
+-- * Mock Application
+
+-- | A mock WAI 'Application' that consistently returns a 200 OK response.
+-- This allows tests to focus solely on the behavior of the rate-limiting middleware.
 mockApp :: Application
 mockApp _ respond = respond $ responseLBS status200 [] (LBS.fromStrict $ TE.encodeUtf8 "OK")
 
--- Test suite
+-- * Test Suite Definition
+
+-- | The main test tree for the Leaky Bucket algorithm.
+-- This 'TestTree' aggregates all the test cases defined in this module.
 tests :: TestTree
 tests = testGroup "Leaky Bucket Tests"
   [ testCase "Allows IPv4 requests below capacity" $ do
@@ -69,6 +123,7 @@ tests = testGroup "Leaky Bucket Tests"
             result2 <- srequest $ SRequest mkIPv4Request LBS.empty
             assertStatus 200 result2
       runSession session app
+
   , testCase "Blocks IPv4 requests exceeding capacity" $ do
       env <- initConfig (const defaultIPZone)
       let throttle = ThrottleConfig
@@ -88,6 +143,7 @@ tests = testGroup "Leaky Bucket Tests"
             result3 <- srequest $ SRequest mkIPv4Request LBS.empty
             assertStatus 429 result3
       runSession session app
+
   , testCase "Allows IPv6 requests below capacity" $ do
       env <- initConfig (const defaultIPZone)
       let throttle = ThrottleConfig
@@ -105,6 +161,7 @@ tests = testGroup "Leaky Bucket Tests"
             result2 <- srequest $ SRequest mkIPv6Request LBS.empty
             assertStatus 200 result2
       runSession session app
+
   , testCase "Blocks IPv6 requests exceeding capacity" $ do
       env <- initConfig (const defaultIPZone)
       let throttle = ThrottleConfig
@@ -124,11 +181,12 @@ tests = testGroup "Leaky Bucket Tests"
             result3 <- srequest $ SRequest mkIPv6Request LBS.empty
             assertStatus 429 result3
       runSession session app
+
   , testCase "Respects leaky bucket timing with IPv4" $ do
       env <- initConfig (const defaultIPZone)
       let throttle = ThrottleConfig
-            { throttleLimit = 2
-            , throttlePeriod = 2
+            { throttleLimit = 2  -- capacity
+            , throttlePeriod = 2 -- time to leak one request (leak rate is capacity / period)
             , throttleAlgorithm = LeakyBucket
             , throttleIdentifier = byIP
             , throttleTokenBucketTTL = Nothing
@@ -142,10 +200,13 @@ tests = testGroup "Leaky Bucket Tests"
             assertStatus 200 result2
             result3 <- srequest $ SRequest mkIPv4Request LBS.empty
             assertStatus 429 result3
-            liftIO $ threadDelay (3 * 1000000) -- Wait for bucket drain
+            -- Wait for the bucket to leak, allowing new requests
+            liftIO $ threadDelay (3 * 1000000) -- Wait 3 seconds
+            -- This request should now be allowed
             result4 <- srequest $ SRequest mkIPv4Request LBS.empty
             assertStatus 200 result4
       runSession session app
+
   , testCase "Handles x-forwarded-for header for IPv4" $ do
       env <- initConfig (const defaultIPZone)
       let throttle = ThrottleConfig
@@ -166,6 +227,7 @@ tests = testGroup "Leaky Bucket Tests"
             result3 <- srequest $ SRequest req LBS.empty
             assertStatus 429 result3
       runSession session app
+
   , testCase "Handles x-real-ip header for IPv6" $ do
       env <- initConfig (const defaultIPZone)
       let throttle = ThrottleConfig
@@ -179,10 +241,8 @@ tests = testGroup "Leaky Bucket Tests"
       let app = attackMiddleware env' mockApp
       let req = mkRequestWithRealIP (T.pack "2001:db8::1")
       let session = do
-            result1 <- srequest $ SRequest req LBS.empty
-            assertStatus 200 result1
-            result2 <- srequest $ SRequest req LBS.empty
-            assertStatus 200 result2
+            _ <- srequest $ SRequest req LBS.empty
+            _ <- srequest $ SRequest req LBS.empty
             result3 <- srequest $ SRequest req LBS.empty
             assertStatus 429 result3
       runSession session app

@@ -1,5 +1,17 @@
 {-# LANGUAGE OverloadedStrings #-}
 
+{-|
+Module      : Keter.RateLimiter.LeakyBucketStateTests
+Description : Tests for the LeakyBucketState data type and its JSON handling
+Copyright   : (c) 2025 Oleksandr Zhabenko
+License     : MIT
+Maintainer  : oleksandr.zhabenko@yahoo.com
+Stability   : experimental
+Portability : POSIX
+
+This module contains unit tests for the 'LeakyBucketState' data type, including
+its construction, equality, JSON serialization/deserialization, and validation logic.
+-}
 module Keter.RateLimiter.LeakyBucketStateTests (tests) where
 
 import Test.Tasty
@@ -8,7 +20,9 @@ import Data.Aeson (encode, decode)
 import qualified Data.ByteString.Lazy.Char8 as LBS
 import Keter.RateLimiter.Types (LeakyBucketState(..))
 
--- | Test suite for Keter.RateLimiter.LeakyBucketState
+-- | Test suite for 'LeakyBucketState' including JSON behavior and validation.
+--
+-- > defaultMain Keter.RateLimiter.LeakyBucketStateTests.tests
 tests :: TestTree
 tests = testGroup "Keter.RateLimiter.LeakyBucketState Tests"
   [ testCase "Construct and compare LeakyBucketState" $ do
@@ -50,7 +64,7 @@ tests = testGroup "Keter.RateLimiter.LeakyBucketState Tests"
         Just decoded -> decoded @?= state
 
   , testCase "Edge case: large valid lastTime" $ do
-      let state = LeakyBucketState { level = 500.0, lastTime = 1755734400 } -- Approx. 2025-08-01
+      let state = LeakyBucketState { level = 500.0, lastTime = 1755734400 } -- ≈ 2025-08-01
       let json = encode state
       case decode json :: Maybe LeakyBucketState of
         Nothing -> assertFailure "JSON deserialization failed for large lastTime"

@@ -1,6 +1,22 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-module Keter.RateLimiter.TokenBucketStateTests (tests) where
+{-|
+Module      : Keter.RateLimiter.TokenBucketStateTests
+Description : Tests for the TokenBucketState data type.
+Copyright   : (c) 2025 Oleksandr Zhabenko
+License     : MIT
+Maintainer  : oleksandr.zhabenko@yahoo.com
+Stability   : stable
+Portability : portable
+
+This module provides unit tests for the 'TokenBucketState' data type,
+ensuring its construction, JSON serialization/deserialization, and
+validation logic work correctly.
+-}
+module Keter.RateLimiter.TokenBucketStateTests (
+  -- * Test Suite
+  tests
+) where
 
 import Test.Tasty
 import Test.Tasty.HUnit
@@ -8,6 +24,7 @@ import Data.Aeson (encode, decode)
 import qualified Data.ByteString.Lazy.Char8 as LBS
 import Keter.RateLimiter.Types (TokenBucketState(..))
 
+-- | The main test tree for 'TokenBucketState'.
 tests :: TestTree
 tests = testGroup "Keter.RateLimiter.TokenBucketState Tests"
   [ testCase "Construct and compare TokenBucketState" $ do
