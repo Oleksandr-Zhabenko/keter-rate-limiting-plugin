@@ -22,7 +22,7 @@ This implementation is released under the MIT License.
 = Overview
 
 The @Notifications@ module supplies a **pluggable notification layer** for the
-rate-limiting parts of the /keter-rate-limiter/ project. Whenever a throttle
+rate-limiting parts of the /keter-rate-limiting-plugin/ project. Whenever a throttle
 decides to reject or allow a request, you may want to:
 
 * store an audit trail,

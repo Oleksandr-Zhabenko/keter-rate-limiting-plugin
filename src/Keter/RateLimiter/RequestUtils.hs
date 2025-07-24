@@ -11,7 +11,7 @@ Portability : portable
 
 Utility helpers for extracting /stable textual keys/ from a WAI
 'Network.Wai.Request'.  They are primarily intended for use with
-rate-limiting middleware (see the @keter-rate-limiter@ package) but are fully
+rate-limiting middleware (see the @keter-rate-limiting-plugin@ package) but are fully
 generic and can be employed anywhere you need a deterministic identifier that
 ties a request to its origin (IP address, path, user-agent, …).
 
