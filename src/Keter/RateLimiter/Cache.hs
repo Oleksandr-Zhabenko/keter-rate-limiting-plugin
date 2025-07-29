@@ -1117,9 +1117,8 @@ startLeakyBucketWorker
   -> TQueue.TQueue (TMVar Bool)     -- ^ Request queue with STM responses
   -> Int                            -- ^ Bucket capacity (maximum level)
   -> Double                         -- ^ Leak rate (requests drained per second)
-  -> Text                           -- ^ Identifier for logging
   -> IO ()                          -- ^ Returns immediately, worker runs in background
-startLeakyBucketWorker stateVar queue capacity leakRate fullKey = void . forkIO $ 
+startLeakyBucketWorker stateVar queue capacity leakRate = void . forkIO $ 
   forever $ do
     replyVar <- atomically $ readTQueue queue
     now <- realToFrac <$> getPOSIXTime

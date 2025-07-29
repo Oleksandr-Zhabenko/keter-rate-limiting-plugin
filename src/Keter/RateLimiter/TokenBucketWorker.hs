@@ -4,9 +4,9 @@
 {-|
 Module      : Keter.RateLimiter.TokenBucketWorker
 Description : Worker thread implementation for token bucket rate limiting
-Copyright   : (c) Keter Project
+Copyright   : (c) 2025 Oleksandr Zhabenko
 License     : MIT
-Maintainer  : maintainer@example.com
+Maintainer  : oleksandr.zhabenko@yahoo.com
 Stability   : experimental
 Portability : POSIX
 
@@ -48,7 +48,7 @@ requestQueue <- newTBroadcastTQueueIO
 readySignal <- newEmptyTMVarIO
 
 -- Start worker: 100 token capacity, 10 tokens/second refill rate
-startTokenBucketWorker initialState requestQueue 100 10.0 "api-key-123" readySignal
+startTokenBucketWorker initialState requestQueue 100 10.0 readySignal
 
 -- Wait for worker to be ready
 atomically $ takeTMVar readySignal
@@ -80,8 +80,6 @@ import Control.Concurrent.STM
 import Control.Monad (void, forever)
 import Control.Concurrent (forkIO)
 import Control.Monad.IO.Class (liftIO)
-import Data.Text (Text)
-import qualified Data.Text as T
 import Data.Time.Clock.POSIX (getPOSIXTime)
 import Keter.RateLimiter.Types (TokenBucketState(..))
 import Control.Concurrent.MVar (MVar, putMVar)
@@ -97,7 +95,6 @@ import Control.Concurrent.MVar (MVar, putMVar)
 -- 1. __Startup__: Worker thread is forked and signals readiness via 'TMVar'
 -- 2. __Processing Loop__: Worker waits for requests, processes them atomically
 -- 3. __Response__: Results are sent back to clients via 'MVar'
--- 4. __Logging__: Each request result is logged with key and allow/deny status
 --
 -- ==== Token Refill Algorithm
 --
@@ -137,20 +134,17 @@ import Control.Concurrent.MVar (MVar, putMVar)
 -- -- Create a bucket for API rate limiting: 1000 requests/hour = ~0.278 req/sec
 -- let capacity = 100              -- Allow bursts up to 100 requests
 --     refillRate = 1000.0 / 3600.0 -- 1000 requests per hour
---     apiKey = "user-api-key-456"
 --
 -- initialState <- newTVarIO $ TokenBucketState capacity now
 -- requestQueue <- newTBroadcastTQueueIO  
 -- readySignal <- newEmptyTMVarIO
 --
--- startTokenBucketWorker initialState requestQueue capacity refillRate apiKey readySignal
+-- startTokenBucketWorker initialState requestQueue capacity refillRate readySignal
 -- @
 --
 -- __Thread Safety:__ All state updates are atomic via STM transactions.
 --
 -- __Resource Usage:__ Creates one background thread that runs indefinitely.
---
--- __Logging:__ Writes to stdout for each processed request (consider configurable logging in production).
 startTokenBucketWorker
   :: TVar TokenBucketState  -- ^ Shared bucket state (tokens + last update time).
                             --   This 'TVar' is read and updated atomically by the worker.
@@ -163,15 +157,12 @@ startTokenBucketWorker
   -> Double                 -- ^ Token refill rate in tokens per second.
                             --   Determines the long-term sustainable request rate.
                             --   Must be positive. Can be fractional (e.g., 0.5 = 1 token per 2 seconds).
-  -> Text                   -- ^ Identifier key for logging purposes (e.g., API key, user ID).
-                            --   Used to distinguish between different buckets in log output.
-                            --   Should not contain sensitive information as it appears in logs.
   -> TMVar ()               -- ^ Synchronization variable to signal when worker is ready.
                             --   The worker writes to this 'TMVar' once startup is complete.
                             --   Clients can wait on this to ensure the worker is operational.
   -> IO ()                  -- ^ Returns immediately after forking the worker thread.
                             --   The actual worker runs in the background indefinitely.
-startTokenBucketWorker stateVar queue capacity refillRate fullKey readyVar = void . forkIO $ do
+startTokenBucketWorker stateVar queue capacity refillRate readyVar = void . forkIO $ do
   -- Signal that the worker is ready
   atomically $ putTMVar readyVar ()
   

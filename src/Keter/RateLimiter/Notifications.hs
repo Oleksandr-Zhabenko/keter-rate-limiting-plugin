@@ -112,7 +112,7 @@ import Data.Time.Format (defaultTimeLocale, formatTime)
 import Network.Wai (Request)
 import qualified Network.Wai as Wai
 import qualified Data.Text.Encoding as TE
-import Network.Socket (SockAddr(..), PortNumber)
+import Network.Socket (SockAddr(..))
 import Keter.RateLimiter.RequestUtils
        ( getClientIP
        , getRequestMethod

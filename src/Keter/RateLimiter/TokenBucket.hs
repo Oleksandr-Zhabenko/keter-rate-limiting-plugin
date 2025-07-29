@@ -45,7 +45,6 @@ import Keter.RateLimiter.Types          (TokenBucketState (..))
 import Keter.RateLimiter.AutoPurge      (TokenBucketEntry (..))
 import qualified Focus                  as F
 import qualified StmContainers.Map      as StmMap
-import Keter.RateLimiter.TokenBucketWorker (startTokenBucketWorker)
 
 ------------------------------------------------------------------------------
 
@@ -155,7 +154,6 @@ allowRequest cache ipZone userKey capacity refillRate expiresIn = liftIO $
                                       (tbeQueue entry)
                                       capacity
                                       refillRate
-                                      key
                                       workerReadyVar
                -- Wait for the worker to signal it's ready before proceeding
                atomically $ takeTMVar workerReadyVar

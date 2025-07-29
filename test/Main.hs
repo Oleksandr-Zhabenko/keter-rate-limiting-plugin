@@ -73,9 +73,8 @@ import Network.HTTP.Types (methodGet)
 import Network.Socket (SockAddr(..))
 import Keter.RateLimiter.Cache ( Cache(..), InMemoryStore(..), Algorithm(..), makeCacheKey, readCache, createInMemoryStore, newCache, incrementCache, writeCache, deleteCache )
 import Keter.RateLimiter.CacheWithZone ( incStoreWithZone, writeCacheWithZone, readCacheWithZone )
-import Keter.RateLimiter.IPZones (IPZoneIdentifier, defaultIPZone, zscCounterCache)
+import Keter.RateLimiter.IPZones (ZoneSpecificCaches(..), IPZoneIdentifier, defaultIPZone)
 import Keter.RateLimiter.WAI ( Env, ThrottleConfig(..), initConfig, addThrottle, instrument, envZoneCachesMap, cacheResetAll )
-import Keter.RateLimiter.IPZones (ZoneSpecificCaches(..), defaultIPZone)
 import qualified Keter.RateLimiter.RequestUtils as RequestUtils
 import System.IO.Unsafe (unsafePerformIO)
 

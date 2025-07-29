@@ -118,7 +118,6 @@ allowRequest cache ipZone userKey capacity leakRate = liftIO $ do
         (lbeQueue entry)
         capacity
         leakRate
-        fullKey
 
     -- All callers block here, waiting for the worker to process their specific
     -- request and provide a boolean result in the reply variable.
