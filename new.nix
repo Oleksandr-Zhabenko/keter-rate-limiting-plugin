@@ -48,7 +48,7 @@ pkgs.haskellPackages.mkDerivation {
     async 
     random
   ];
-  testTargets = [ "--test-options='--num-threads=1'" "--test-options='--hide-successes'" ]; # Run tests sequentially, hide successes, output only failures
+  testTargets = [ "--test-options='--num-threads=1'" "--test-options='--color=always'" ]; #"--test-options='--hide-successes'" ]; # Run tests sequentially, hide successes, output only failures
   homepage = "https://github.com/Oleksandr-Zhabenko/keter-rate-limiting-plugin";
   description = "Simple Keter rate limiting plugin";
   license = pkgs.lib.licenses.mit;

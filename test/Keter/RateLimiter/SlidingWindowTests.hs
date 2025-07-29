@@ -38,7 +38,6 @@ import qualified Data.ByteString.Lazy as LBS
 import Control.Monad (replicateM_)
 import Control.Concurrent (threadDelay, forkIO)
 import Control.Concurrent.MVar (newMVar, modifyMVar_, withMVar)
---import Control.Concurrent.STM (newTVarIO)
 import Network.Wai (Request, Application, defaultRequest, requestHeaders, responseLBS, remoteHost)
 import Network.Wai.Test (runSession, srequest, SRequest(..), assertStatus, simpleStatus)
 import Network.HTTP.Types (status200)
@@ -49,7 +48,6 @@ import Keter.RateLimiter.WAI
 import Keter.RateLimiter.SlidingWindow (allowRequest)
 import Keter.RateLimiter.RequestUtils
 import Keter.RateLimiter.IPZones (defaultIPZone)
---import Control.Monad.IO.Class (liftIO)
 import Data.CaseInsensitive (mk)
 import Data.IORef (newIORef, modifyIORef', readIORef)
 

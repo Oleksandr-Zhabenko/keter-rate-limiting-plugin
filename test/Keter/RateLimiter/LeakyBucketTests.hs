@@ -35,11 +35,9 @@ module Keter.RateLimiter.LeakyBucketTests (
 
 import Test.Tasty
 import Test.Tasty.HUnit
---import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
---import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
 import Control.Concurrent (threadDelay, forkIO)
 import Control.Concurrent.MVar (newMVar, modifyMVar_, withMVar)
@@ -52,13 +50,11 @@ import Keter.RateLimiter.Cache
 import Keter.RateLimiter.RequestUtils
 import Keter.RateLimiter.WAI
 import Keter.RateLimiter.IPZones
---import Keter.RateLimiter.Types (LeakyBucketState(..))
 import Keter.RateLimiter.LeakyBucket (allowRequest)
 import Control.Monad.IO.Class (liftIO)
 import Data.CaseInsensitive (mk)
 import qualified StmContainers.Map as StmMap
 import Control.Concurrent.STM
---import Data.Time.Clock.POSIX (getPOSIXTime)
 import Data.Function (fix)
 
 -- * Mock Request Generation

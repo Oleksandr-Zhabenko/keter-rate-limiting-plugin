@@ -55,7 +55,6 @@ import Numeric (showHex)
 import Data.Bits
 import Control.Concurrent.STM (newTVarIO, atomically, readTVar) 
 import qualified StmContainers.Map as StmMap
-import Debug.Trace (traceM)
 
 --------------------------------------------------------------------------------
 
@@ -167,7 +166,6 @@ resetZoneCache zsc algorithm = case algorithm of
 sockAddrToIPZone :: SockAddr -> IO Text
 sockAddrToIPZone (SockAddrInet _ hostAddr) = do
   let ip = fromHostAddress hostAddr
-  traceM $ "sockAddrToIPZone IPv4: HostAddress=" ++ show hostAddr ++ ", IP=" ++ show ip
   return $ T.pack $ show ip
 sockAddrToIPZone (SockAddrInet6 _ _ (w1, w2, w3, w4) _) = 
   return $ T.intercalate ":" $ map (T.pack . showHexWord) 

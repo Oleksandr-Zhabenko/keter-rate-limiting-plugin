@@ -55,7 +55,6 @@ module Keter.RateLimiter.WAI
   ) where
 
 import Data.Text (Text)
---import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Data.Map.Strict as Map
 import Network.Wai
@@ -63,13 +62,11 @@ import Network.HTTP.Types (status429)
 import qualified Data.ByteString.Lazy as LBS
 import Data.IORef
 import Control.Concurrent.STM
---import Control.Monad.IO.Class (liftIO)
 import Keter.RateLimiter.Cache
 import Keter.RateLimiter.IPZones (IPZoneIdentifier, defaultIPZone, ZoneSpecificCaches(..), createZoneCaches)
 import qualified Keter.RateLimiter.SlidingWindow as SlidingWindow
 import qualified Keter.RateLimiter.TokenBucket as TokenBucket
 import qualified Keter.RateLimiter.LeakyBucket as LeakyBucket
---import Keter.RateLimiter.RequestUtils
 import Keter.RateLimiter.CacheWithZone (allowFixedWindowRequest)
 import Data.TinyLRU (allowRequestTinyLRU)
 import System.Clock (Clock(Monotonic), getTime)

@@ -13,7 +13,7 @@ Copyright (c) 2025 Oleksandr Zhabenko
   
 This file is a ported to Haskell language code with some simlifications of Ruby on Rails
 https://github.com/rails/rails 
-https://github.com/rails/rails/blob/2318163b4b9e9604b557057c0465e2a5ef162401/activesupport/lib/active_support/notifications.rbAdd commentMore actions
+https://github.com/rails/rails/blob/2318163b4b9e9604b557057c0465e2a5ef162401/activesupport/lib/active_support/notifications.rb
 and is based on the structure of the original code of 
 rack-attack, Copyright (c) David Heinemeier Hansson, under the MIT License.
 
@@ -32,13 +32,13 @@ decides to reject or allow a request, you may want to:
 
 The abstraction is intentionally minimal:
 
-* 'Notifier' – a “generic” notifier that works with arbitrary data (converted
+* 'Notifier' – a "generic" notifier that works with arbitrary data (converted
   to a textual representation by the caller).
 * 'WAINotifier' – a convenience type alias specialised for WAI 'Network.Wai.Request' objects.
 
 Both flavours come with:
 
-* “do-nothing” implementations ('noopNotifier', 'noopWAINotifier') for easy disabling or testing, and
+* "do-nothing" implementations ('noopNotifier', 'noopWAINotifier') for easy disabling or testing, and
 * simple console loggers ('consoleNotifier', 'consoleWAINotifier') for straightforward debugging.
 
 You can easily lift these notifiers into your favourite effect stack by wrapping the
@@ -50,6 +50,7 @@ You can easily lift these notifiers into your favourite effect stack by wrapping
 {-# LANGUAGE OverloadedStrings #-}
 import Keter.RateLimiter.Notifications
 import Network.Wai
+import Network.Socket
 import Network.Wai.Handler.Warp (run)
 import Network.HTTP.Types (status429)
 import Control.Monad.IO.Class (liftIO)
@@ -111,6 +112,7 @@ import Data.Time.Format (defaultTimeLocale, formatTime)
 import Network.Wai (Request)
 import qualified Network.Wai as Wai
 import qualified Data.Text.Encoding as TE
+import Network.Socket (SockAddr(..), PortNumber)
 import Keter.RateLimiter.RequestUtils
        ( getClientIP
        , getRequestMethod
@@ -154,13 +156,15 @@ type WAINotifier = Text      -- ^ throttleName: Logical name of the limiter.
 --
 -- It simplifies calling a notifier by using a fixed action verb (@"blocked"@)
 -- and automatically converting the rate-limited item to 'Text' via its 'Show'
--- instance.
+-- instance. Note that using 'show' on a 'Text' or 'String' value will add
+-- quotes around it in the output.
 --
 -- ==== __Example__
 --
 -- @
 -- -- Assuming 'consoleNotifier' is defined as in this module.
 -- notify consoleNotifier "login-per-ip" ("192.0.2.1" :: Text) 20
+-- -- This would log: ... blocked "192.0.2.1" ...
 -- @
 notify :: Show req        -- ^ The item being rate-limited, must be 'Show'able.
        => Notifier
@@ -183,10 +187,11 @@ noopNotifier = Notifier
 
 -- | A 'Notifier' that logs events to standard output ('stdout').
 --
--- The log format is a single, timestamped line, for example:
+-- The log format is a single, timestamped line. Note that the item is rendered
+-- using 'show', which will add quotes for textual types.
 --
 -- @
--- 2025-01-30 13:45:12 - login-per-ip blocked 192.0.2.1 (limit: 20)
+-- 2025-01-30 13:45:12 - login-per-ip blocked "192.0.2.1" (limit: 20)
 -- @
 consoleNotifier :: Notifier
 consoleNotifier = Notifier
@@ -194,9 +199,11 @@ consoleNotifier = Notifier
   , notifierAction = \throttle act item limit -> do
       now <- getCurrentTime
       let ts = fmt now
-      TIO.putStrLn $
-        ts <> " - " <> throttle <> " " <> act <> " "
-           <> item <> " (limit: " <> T.pack (show limit) <> ")"
+          -- Create a list of the components for the message.
+          parts = [throttle, act, item, T.concat ["(limit: ", T.pack (show limit), ")"]]
+          -- Filter out any empty strings and join the rest with a single space.
+          message = T.intercalate " " $ filter (not . T.null) parts
+      TIO.putStrLn $ T.concat [ts, " - ", message]
   }
   where
     fmt = T.pack . formatTime defaultTimeLocale "%Y-%m-%d %H:%M:%S"
@@ -222,8 +229,10 @@ waiNotifier Notifier{..} throttleName req limit =
 
 -- | Converts a WAI 'Request' to a compact, single-line textual representation.
 --
--- The output format is: @METHOD PATH?QUERY from IP@
--- For example: @GET /index.html?lang=en from 127.0.0.1@
+-- The output format is: @METHOD PATH?QUERY from IP:PORT@
+-- For example: @GET /index.html?lang=en from 127.0.0.1:8080@
+--
+-- The port number is omitted for non-IP socket types (e.g., Unix sockets).
 --
 -- This function uses 'unsafePerformIO' internally to resolve the client's IP
 -- address via 'getClientIP'. This is considered acceptable for logging and
@@ -233,11 +242,15 @@ waiNotifier Notifier{..} throttleName req limit =
 -- from being duplicated by compiler optimizations.
 convertWAIRequest :: Request -> Text
 convertWAIRequest req =
-  let method   = getRequestMethod  req
-      path     = getRequestPath    req
+  let method   = getRequestMethod req
+      path     = getRequestPath req
       query    = TE.decodeUtf8 $ Wai.rawQueryString req
       clientIP = unsafePerformIO $ getClientIP req
-  in method <> " " <> path <> query <> " from " <> clientIP
+      portStr  = case Wai.remoteHost req of
+                   SockAddrInet port _ -> ":" <> T.pack (show port)
+                   SockAddrInet6 port _ _ _ -> ":" <> T.pack (show port)
+                   _ -> ""  -- Unix sockets or unknown; omit port
+  in method <> " " <> path <> query <> " from " <> clientIP <> portStr
 {-# NOINLINE convertWAIRequest #-}
   -- NOINLINE is important due to the use of unsafePerformIO,
   -- ensuring the IO action is not inadvertently duplicated.
@@ -253,7 +266,7 @@ noopWAINotifier _ _ _ = pure ()
 -- The log format is, for example:
 --
 -- @
--- 2025-01-30 13:45:12 - api-global blocked GET /v1/users?id=123 from 192.0.2.1 (limit: 1000)
+-- 2025-01-30 13:45:12 - api-global blocked GET /v1/users?id=123 from 192.0.2.1:54321 (limit: 1000)
 -- @
 consoleWAINotifier :: WAINotifier
 consoleWAINotifier throttleName req limit = do

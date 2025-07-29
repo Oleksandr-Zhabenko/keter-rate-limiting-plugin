@@ -38,7 +38,6 @@ import Control.Concurrent.MVar
 import Control.Concurrent.STM
 import Control.Monad.IO.Class   (MonadIO, liftIO)
 import Data.Text                (Text)
-import qualified Data.Text as T
 import Data.Time.Clock.POSIX    (getPOSIXTime)
 
 import Keter.RateLimiter.Cache
@@ -160,15 +159,12 @@ allowRequest cache ipZone userKey capacity refillRate expiresIn = liftIO $
                                       workerReadyVar
                -- Wait for the worker to signal it's ready before proceeding
                atomically $ takeTMVar workerReadyVar
-               putStrLn $ "TokenBucket: Key=" ++ T.unpack key ++ ", Allowed=True (new bucket)"
                pure True
              else do
                -- If capacity is 0, no request can ever be allowed.
-               putStrLn $ "TokenBucket: Key=" ++ T.unpack key ++ ", Allowed=False (capacity is 0)"
                pure False
          else do
            -- For existing buckets, enqueue the request and wait for response
            atomically $ writeTQueue (tbeQueue entry) replyVar
            result <- takeMVar replyVar
-           putStrLn $ "TokenBucket: Key=" ++ T.unpack key ++ ", Allowed=" ++ show result
            pure result

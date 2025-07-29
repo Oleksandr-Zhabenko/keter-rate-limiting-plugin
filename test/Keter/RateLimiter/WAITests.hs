@@ -54,7 +54,6 @@ import Keter.RateLimiter.IPZones (defaultIPZone)
 import Keter.RateLimiter.WAI
 import Keter.RateLimiter.RequestUtils
 import Keter.RateLimiter.Cache (Algorithm(..))
---import Keter.RateLimiter.CacheWithZone (allowFixedWindowRequest)
 
 -- * Request Helpers
 

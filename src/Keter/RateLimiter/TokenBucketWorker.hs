@@ -199,8 +199,5 @@ startTokenBucketWorker stateVar queue capacity refillRate fullKey readyVar = voi
           -- to ensure the next refill calculation is correct.
           writeTVar stateVar (TokenBucketState (floor currentTokens) now)
           return False
-    -- Log the result and send the response back to the waiting client.
-    -- Note: The token count for logging is not available here without another read,
-    -- but the 'Allowed' status is the critical piece of information.
-    liftIO $ putStrLn $ "TokenBucket Worker: Key=" ++ T.unpack fullKey ++ ", Allowed=" ++ show allowed
+    -- Send the response back to the waiting client.
     liftIO $ putMVar replyVar allowed

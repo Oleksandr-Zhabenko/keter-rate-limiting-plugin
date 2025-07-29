@@ -27,7 +27,6 @@ module Keter.RateLimiter.LeakyBucket
   ) where
 
 import Control.Concurrent.STM
---import Control.Concurrent.STM.TQueue (TQueue, writeTQueue)
 import Control.Monad (when)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.Text (Text)

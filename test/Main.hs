@@ -192,6 +192,7 @@ main = do
 mainTests :: TestTree
 mainTests = testGroup "Rate Limiter and IP Zones Tests"
   [ TinyLRUTests.tests
+  , Keter.RateLimiter.NotificationTests.tests
   , testBackgroundPurge
   , rateLimiterTests
   , ipZoneTests
@@ -203,7 +204,6 @@ mainTests = testGroup "Rate Limiter and IP Zones Tests"
   , Keter.RateLimiter.SlidingWindowTests.tests
   , Keter.RateLimiter.TokenBucketTests.tests
   , Keter.RateLimiter.WAITests.tests
-  , Keter.RateLimiter.NotificationTests.tests
   ]
 
 -- | Tests for general rate-limiting functionality using the default IP zone.
