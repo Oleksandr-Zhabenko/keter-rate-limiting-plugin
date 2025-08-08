@@ -2,12 +2,11 @@
 
 pkgs.haskellPackages.mkDerivation {
   pname = "keter-rate-limiting-plugin";
-  version = "0.1.0.0";
+  version = "0.1.0.1";
   src = ./.;
   libraryHaskellDepends = with pkgs.haskellPackages; [
     aeson 
     base 
-    # base64-bytestring 
     bytestring 
     cache 
     clock 
@@ -22,7 +21,6 @@ pkgs.haskellPackages.mkDerivation {
     time 
     wai
     iproute 
-    #mtl 
     list-t 
     stm-containers 
     stm
@@ -48,7 +46,7 @@ pkgs.haskellPackages.mkDerivation {
     async 
     random
   ];
-  testTargets = [ "--test-options='--num-threads=1'" "--test-options='--color=always'" ]; #"--test-options='--hide-successes'" ]; # Run tests sequentially, hide successes, output only failures
+  testTargets = [ "--test-options='--num-threads=1'" "--test-options='--color=always'" ]; #"--test-options='--hide-successes'" ]; # Run tests sequentially
   homepage = "https://github.com/Oleksandr-Zhabenko/keter-rate-limiting-plugin";
   description = "Simple Keter rate limiting plugin";
   license = pkgs.lib.licenses.mit;

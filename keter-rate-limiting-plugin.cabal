@@ -1,10 +1,11 @@
 cabal-version:      3.0
 name:               keter-rate-limiting-plugin
-version:            0.1.0.0
+version:            0.1.0.1
 synopsis:           Simple Keter rate limiting plugin.
 description:
     A modern, high-performance, and highly customisable rate limiting plugin for keter.
     Provides four window algorithms (Fixed Window, Sliding Window, Token Bucket, Leaky Bucket),
+    as well as TinyLRU cache approach,
     IP zone support, and convenient and customisable API.
     See README.md and homepage for usage and details.
 homepage:           https://github.com/Oleksandr-Zhabenko/keter-rate-limiting-plugin
