@@ -5,9 +5,9 @@
 {-|
 Module      : Keter.RateLimiter.Types
 Description : Core data types for rate limiting algorithms
-Copyright   : (c) Keter Project
+Copyright   : (c) Oleksandr Zhabenko
 License     : MIT
-Maintainer  : maintainer@example.com
+Maintainer  : oleksandr.zhabenko@yahoo.com
 Stability   : experimental
 Portability : POSIX
 

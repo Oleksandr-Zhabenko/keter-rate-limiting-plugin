@@ -8,3 +8,7 @@
 
 * First version revised A. Fixed description and some cleaning up.
 
+## 0.1.0.2 -- 2025-08-08
+
+* First version revised B. Fixed some documentation issues.
+

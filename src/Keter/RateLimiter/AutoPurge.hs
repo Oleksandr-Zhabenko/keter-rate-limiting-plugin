@@ -5,9 +5,9 @@
 {-|
 Module      : Keter.RateLimiter.AutoPurge
 Description : Automatic cleanup and garbage collection for rate limiter caches
-Copyright   : (c) Keter Project
+Copyright   : (c) Oleksandr Zhabenko
 License     : MIT
-Maintainer  : maintainer@example.com
+Maintainer  : oleksandr.zhabenko@yahoo.com
 Stability   : experimental
 Portability : POSIX
 

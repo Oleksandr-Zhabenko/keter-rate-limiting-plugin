@@ -12,8 +12,8 @@ Portability : portable
 Copyright (c) 2025 Oleksandr Zhabenko
   
 This file is a ported to Haskell language code with some simplifications of Ruby on Rails
-https://github.com/rails/rails 
-https://github.com/rails/rails/blob/2318163b4b9e9604b557057c0465e2a5ef162401/activesupport/lib/active_support/notifications.rb
+'https://github.com/rails/rails'
+'https://github.com/rails/rails/blob/2318163b4b9e9604b557057c0465e2a5ef162401/activesupport/lib/active\_support/notifications.rb'
 and is based on the structure of the original code of 
 rack-attack, Copyright (c) David Heinemeier Hansson, under the MIT License.
 

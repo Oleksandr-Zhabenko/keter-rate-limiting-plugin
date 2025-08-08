@@ -3,9 +3,9 @@
 -- |
 -- Module      : Data.TinyLRU
 -- Description : A lightweight, thread-safe, in-memory LRU cache.
--- Copyright   : (c) 2025 Your Name
+-- Copyright   : (c) 2025 Oleksandr Zhabenko
 -- License     : MIT
--- Maintainer  : your.email@example.com
+-- Maintainer  : oleksandr.zhabenko@yahoo.com
 -- Stability   : experimental
 -- Portability : POSIX
 --
