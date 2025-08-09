@@ -1,6 +1,6 @@
 # keter-rate-limiting-plugin
 
-**keter-rate-limiting-plugin** is a modern, high-performance, and highly customizable rate-limiting plugin for [Keter](https://github.com/snoyberg/keter). It addresses [issue \#301](https://github.com/snoyberg/keter/issues/301) and brings robust, production-grade request throttling to Haskell web applications, featuring efficient in-memory caching and IP zone isolation.
+**keter-rate-limiting-plugin** is a modern, high-performance, and highly customizable rate-limiting plugin for [Keter](https://github.com/snoyberg/keter). It addresses [issue \#301](https://github.com/snoyberg/keter/issues/301) and brings robust, production-grade request throttling to Haskell web applications, featuring efficient in-memory caching with HashMap-based lookups and IP zone isolation.
 
 This library is inspired by [rack-attack](https://github.com/rack/rack-attack) and and [Ruby on Rails](https://github.com/rails/rails) (for Keter.RateLimiter.Notifications) and provides a powerful middleware for Keter-managed applications, though it can be integrated with any WAI-compatible Haskell web stack.
 
@@ -12,22 +12,22 @@ This library is inspired by [rack-attack](https://github.com/rack/rack-attack) a
       - Token Bucket
       - Leaky Bucket
       - TinyLRU (Least Recently Used)
-  - **IP Zone Support**: Isolate caches and throttling policies per IP zone, customer segment, or any other logical grouping.
-  - **Flexible Throttle Configuration**: Set limits, periods, algorithms, and unique identifiers on a per-throttle basis.
+  - **IP Zone Support**: Isolate caches and throttling policies per IP zone, customer segment, or any other logical grouping with efficient HashMap-based zone lookups.
+  - **Flexible Throttle Configuration**: Set limits, periods, algorithms, and unique identifiers on a per-throttle basis, stored in optimized HashMap structures.
   - **WAI Middleware**: Integrates seamlessly as a middleware into any WAI application.
   - **Convenient and Customizable API**:
       - Use simple wrappers for common scenarios with automatic key composition.
       - Or, for advanced use, fully control cache key structure and throttling logic.
-  - **Memory-efficient**: Designed for large-scale, high-traffic deployments with automatic cleanup of expired entries.
+  - **Memory-efficient**: Designed for large-scale, high-traffic deployments with automatic cleanup of expired entries and HashMap-based O(1) average-case lookups.
   - **Easy Integration**: Minimal code changes are required to get started.
 
 ## Why Use This Plugin?
 
-  - **Scalability**: Per-zone caches and flexible throttling allow you to scale from single-user apps to multi-tenant platforms.
-  - **Performance**: The in-memory backend is built on efficient STM-based containers for high-concurrency workloads.
+  - **Scalability**: Per-zone caches with HashMap-based storage and flexible throttling allow you to scale from single-user apps to multi-tenant platforms.
+  - **Performance**: The in-memory backend is built on efficient STM-based containers with HashMap optimizations for high-concurrency workloads.
   - **Security**: Protects your application from abusive clients and denial-of-service attacks.
   - **Flexibility**: Choose between the convenience of wrappers and the full customizability of manual key management.
-  - **Production-Ready**: Inspired by industry-standard tools, thoroughly documented, and designed for reliability.
+  - **Production-Ready**: Inspired by industry-standard tools, thoroughly documented, and designed for reliability with efficient data structures.
   - **Open Source**: MIT licensed and community-friendly.
 
 ## Installation
@@ -52,7 +52,7 @@ Then, rebuild your project. No external C libraries are required.
 
 ## Quick Start
 
-The following example sets up a simple WAI application with a single rate-limiting rule: 10 requests per 60 seconds from a given IP address. It also demonstrates assigning requests to different IP zones.
+The following example sets up a simple WAI application with a single rate-limiting rule: 10 requests per 60 seconds from a given IP address. It also demonstrates assigning requests to different IP zones using efficient HashMap-based zone resolution.
 
 ```haskell
 {-# LANGUAGE OverloadedStrings #-}
@@ -74,6 +74,7 @@ main = do
   -- 1. Initialize the rate limiter configuration.
   -- This function determines the IP Zone for each request.
   -- Here, we route traffic from "127.0.0.1" to "local_zone" and all other traffic to the default zone.
+  -- The environment uses HashMap-based storage for efficient zone cache lookups.
   env <- initConfig (\req -> if requestHeaderHost req == Just "127.0.0.1" then "local_zone" else defaultIPZone)
 
   -- 2. Define a throttle rule.
@@ -86,6 +87,7 @@ main = do
         }
 
   -- 3. Add the throttle rule to the environment.
+  -- The throttle is stored in a HashMap for O(1) average-case retrieval.
   env' <- addThrottle env "req/ip" ipThrottle
 
   -- 4. Wrap your application with the middleware.
@@ -99,7 +101,7 @@ main = do
 
 ### Using the Convenient API
 
-The `CacheWithZone` module provides helpers that automatically compose cache keys from the algorithm, zone, and user key, simplifying common use cases.
+The `CacheWithZone` module provides helpers that automatically compose cache keys from the algorithm, zone, and user key, simplifying common use cases while leveraging efficient HashMap-based zone lookups.
 
 ```haskell
 import Keter.RateLimiter.Cache
@@ -112,12 +114,13 @@ let cache = newCache FixedWindow fixedWindowStore
 -- Increment a counter for a user in a specific zone.
 -- The key "rate_limiter:zoneX:userX" is created automatically.
 -- The request is allowed if the count is within the limit.
+-- Zone lookup uses HashMap for O(1) average performance.
 isAllowed <- allowFixedWindowRequest cache "zoneX" "userX" 100 3600 -- 100 requests per hour
 ```
 
 ### Using the Customizable API
 
-For more complex scenarios, you can manually construct cache keys and interact directly with the `Cache` module. This gives you full control over the key structure.
+For more complex scenarios, you can manually construct cache keys and interact directly with the `Cache` module. This gives you full control over the key structure while still benefiting from HashMap-optimized storage.
 
 ```haskell
 import Keter.RateLimiter.Cache
@@ -134,7 +137,7 @@ mVal <- readCache cache customKey :: IO (Maybe Int)
 
 ### Token Bucket Example (with TTL)
 
-The Token Bucket algorithm allows for bursts of traffic. You can also specify a TTL for how long an idle bucket remains in memory.
+The Token Bucket algorithm allows for bursts of traffic. You can also specify a TTL for how long an idle bucket remains in memory. The throttle configuration is efficiently stored and retrieved using HashMap-based lookups.
 
 ```haskell
 import Keter.RateLimiter.WAI
@@ -149,11 +152,22 @@ let tokenBucketThrottle = ThrottleConfig
       }
 
 -- env' <- addThrottle env "api/token" tokenBucketThrottle
+-- The throttle will be stored in the environment's HashMap for efficient retrieval
 ```
+
+## Performance Characteristics
+
+This library is optimized for high-performance scenarios:
+
+- **HashMap-based zone caches**: O(1) average-case lookup for IP zone cache resolution
+- **HashMap-based throttle storage**: O(1) average-case retrieval of throttle configurations
+- **STM-based concurrent access**: Thread-safe operations with minimal contention
+- **Memory-efficient algorithms**: Automatic cleanup of expired entries across all rate limiting algorithms
+- **Scalable architecture**: Designed to handle thousands of concurrent requests with minimal overhead
 
 ## Testing
 
-This package includes an extensive test suite covering all supported rate-limiting algorithms, IP zone isolation, and cache management.
+This package includes an extensive test suite covering all supported rate-limiting algorithms, IP zone isolation, cache management, and HashMap-based performance optimizations.
 
 To run the tests:
 
@@ -171,8 +185,9 @@ stack test
 
   - You need robust and efficient request throttling for your Haskell web application.
   - You want to protect your service from abuse and DoS attacks.
-  - You require per-zone or per-user isolation of throttling policies.
+  - You require per-zone or per-user isolation of throttling policies with efficient lookups.
   - You value both convenience and the ability to customize behavior as needed.
+  - You need high-performance rate limiting that can scale to handle large numbers of concurrent requests and zones.
 
 ## License
 

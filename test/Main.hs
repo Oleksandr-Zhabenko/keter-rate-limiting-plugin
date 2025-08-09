@@ -64,7 +64,7 @@ import Data.IORef (readIORef)
 import Data.Cache (purgeExpired)
 import Test.Tasty (TestTree, defaultMain, testGroup)
 import Test.Tasty.HUnit (testCase, assertEqual, assertFailure)
-import qualified Data.Map.Strict as Map
+import qualified Data.HashMap.Strict as HashMap
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TE
@@ -418,7 +418,7 @@ testTimeBasedReset = do
   threadDelay 1_500_000 -- 1.5 seconds to ensure expiration
   -- Debug cache state
   cachesMap <- readIORef (envZoneCachesMap envWithThrottle)
-  zoneCaches <- case Map.lookup testIPZoneA cachesMap of
+  zoneCaches <- case HashMap.lookup testIPZoneA cachesMap of
     Just caches -> return caches
     Nothing -> assertFailure "Zone caches not found" >> return undefined
   let cache :: Cache (InMemoryStore 'FixedWindow)

@@ -30,6 +30,7 @@ pkgs.haskellPackages.mkDerivation {
     base 
     bytestring 
     containers 
+    unordered-containers
     http-types 
     network 
     tasty 

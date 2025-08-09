@@ -211,6 +211,9 @@ module Keter.RateLimiter.Cache
     -- * Entry Creation
   , createTokenBucketEntry
   , createLeakyBucketEntry
+    -- * Algorithm utilities
+  , algoToText
+  , parseAlgoText
   ) where
 
 import Control.Concurrent.STM
@@ -219,8 +222,10 @@ import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad (void, forever)
 import Control.Concurrent (forkIO, threadDelay)
 import Data.Aeson (ToJSON, FromJSON, decodeStrict, encode)
+import Data.Aeson.Types (Parser)
 import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
+import qualified Data.Text as Tx (unpack, toLower)
 import qualified Data.TinyLRU as TinyLRU
 import Data.Text.Encoding (encodeUtf8, decodeUtf8')
 import qualified Data.Cache as C
@@ -1238,3 +1243,107 @@ makeCacheKey :: Algorithm  -- ^ Rate limiting algorithm for prefix
              -> Text       -- ^ User key (e.g., API key, user ID, IP address)
              -> Text       -- ^ Complete hierarchical cache key
 makeCacheKey algo ipZone userKey = algorithmPrefix algo <> ":" <> ipZone <> ":" <> userKey
+
+-- | Convert an Algorithm value to its canonical Text representation.
+--
+-- This function provides a standardized textual representation of rate limiting
+-- algorithms for serialization, logging, and configuration files. Each algorithm
+-- has exactly one canonical PascalCase representation matching the constructor names.
+--
+-- ==== Output Format
+--
+-- @
+-- FixedWindow    → "FixedWindow"
+-- SlidingWindow  → "SlidingWindow" 
+-- TokenBucket    → "TokenBucket"
+-- LeakyBucket    → "LeakyBucket"
+-- TinyLRU        → "TinyLRU"
+-- @
+--
+-- ==== Examples
+--
+-- @
+-- -- Basic usage
+-- algoToText TokenBucket  -- "TokenBucket"
+--
+-- -- Configuration serialization
+-- data RateLimitConfig = RateLimitConfig
+--   { algorithm :: Text, limit :: Int, window :: Int }
+-- 
+-- config = RateLimitConfig (algoToText SlidingWindow) 1000 3600
+--
+-- -- Logging
+-- logInfo $ "Using " <> algoToText currentAlgo <> " rate limiting"
+-- @
+--
+-- This function is pure, thread-safe, and forms a reversible pair with 'parseAlgoText'.
+-- Time complexity: O(1), Space complexity: O(1).
+--
+-- @since 0.1.1.0
+algoToText :: Algorithm -> Text
+algoToText FixedWindow   = "FixedWindow"
+algoToText SlidingWindow = "SlidingWindow"
+algoToText TokenBucket   = "TokenBucket"
+algoToText LeakyBucket   = "LeakyBucket"
+algoToText TinyLRU       = "TinyLRU"
+
+-- | Parse a Text representation back into an Algorithm value.
+--
+-- Provides flexible parsing with case-insensitive matching and hyphenated format support.
+-- Returns an Aeson Parser for seamless JSON integration with rich error reporting.
+--
+-- ==== Supported Formats
+--
+-- @
+-- Algorithm      │ Accepted Inputs (case-insensitive)
+-- ──────────────┼───────────────────────────────────
+-- FixedWindow   │ "fixedwindow", "fixed-window"
+-- SlidingWindow │ "slidingwindow", "sliding-window"
+-- TokenBucket   │ "tokenbucket", "token-bucket"
+-- LeakyBucket   │ "leakybucket", "leaky-bucket"
+-- TinyLRU       │ "tinylru", "tiny-lru"
+-- @
+--
+-- ==== Examples
+--
+-- @
+-- -- JSON parsing
+-- instance FromJSON RateLimitConfig where
+--   parseJSON = withObject "RateLimitConfig" $ \o ->
+--     RateLimitConfig <$> (o .: "algorithm" >>= parseAlgoText)
+--                     <*> o .: "limit"
+--
+-- -- Configuration file (accepts flexible formats)
+-- parseAlgoText "token-bucket"    -- Success TokenBucket
+-- parseAlgoText "SLIDING-WINDOW"  -- Success SlidingWindow
+-- parseAlgoText "invalid"         -- Error "Unknown algorithm: invalid"
+-- @
+--
+-- ==== Error Handling
+--
+-- Calls @fail@ with descriptive error messages for invalid inputs. In aeson's
+-- Parser context, this provides rich error reporting with parsing context.
+--
+-- ==== Round-trip Property
+--
+-- @
+-- forall algo. parseAlgoText (algoToText algo) == Success algo
+-- @
+--
+-- This function is pure, thread-safe, with O(1) time complexity after O(n) normalization.
+--
+-- @since 0.1.1.0
+parseAlgoText :: Text -> Parser Algorithm
+parseAlgoText t =
+  case Tx.toLower t of
+    "fixedwindow"    -> pure FixedWindow
+    "fixed-window"   -> pure FixedWindow
+    "slidingwindow"  -> pure SlidingWindow
+    "sliding-window" -> pure SlidingWindow
+    "tokenbucket"    -> pure TokenBucket
+    "token-bucket"   -> pure TokenBucket
+    "leakybucket"    -> pure LeakyBucket
+    "leaky-bucket"   -> pure LeakyBucket
+    "tinylru"        -> pure TinyLRU
+    "tiny-lru"       -> pure TinyLRU
+    _ -> fail ("Unknown algorithm: " <> Tx.unpack t)
