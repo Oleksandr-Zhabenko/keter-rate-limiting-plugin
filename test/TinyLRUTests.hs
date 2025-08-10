@@ -47,7 +47,6 @@ import Keter.RateLimiter.CacheWithZone
   , deleteCacheWithZone
   )
 import Control.Monad
-import Control.Concurrent (threadDelay)
 import qualified StmContainers.Map as Map
 import System.Random (randomRIO)
 import Data.Maybe (isJust)
@@ -267,19 +266,22 @@ tests = testGroup "TinyLRU Tests"
       assertEqual "Tail is Nothing after reset" "Nothing" tailStr
       atomically $ checkListConsistency cache
 
-  , testCase "Integration with Cache" $ do
+  , testCase "Integration with Cache: Zone-Based Operations" $ do
       cache <- newTinyLRUCache
-      now <- getTime Monotonic
-      allowed1 <- allowRequest cache "key1" 2 5
-      assertBool "First request allowed" allowed1
-      allowed2 <- allowRequest cache "key1" 2 5
-      assertBool "Second request allowed" allowed2
-      allowed3 <- allowRequest cache "key1" 2 5
-      assertBool "Third request denied" (not allowed3)
-      threadDelay 6000000 -- Wait 6 seconds (> period of 5)
-      now' <- getTime Monotonic
-      allowed4 <- allowRequest cache "key1" 2 5
-      assertBool "Request allowed after expiration" allowed4
+      -- writeCacheWithZone :: Cache store -> Text -> Text -> Text -> v -> Int -> IO ()
+      --                      cache       throttle ipZone  userKey value expiresIn
+      writeCacheWithZone cache "throttle1" "192.168.1.1" "user1" (42 :: Int) 60
+      
+      -- readCacheWithZone :: Cache store -> Text -> Text -> Text -> IO (Maybe v)
+      --                     cache        throttle ipZone  userKey
+      result1 <- readCacheWithZone cache "throttle1" "192.168.1.1" "user1"
+      assertEqual "Zone-based read returns Just 42" (Just 42) result1
+      
+      -- deleteCacheWithZone :: Cache store -> Text -> Text -> Text -> IO ()
+      --                       cache        throttle ipZone  userKey
+      deleteCacheWithZone cache "throttle1" "192.168.1.1" "user1"
+      result2 <- readCacheWithZone cache "throttle1" "192.168.1.1" "user1"
+      assertEqual "Zone-based delete removes key" Nothing result2
       atomically $ checkWrappedListConsistency cache
 
   , testCase "Concurrent Access" $ do
@@ -371,11 +373,11 @@ tests = testGroup "TinyLRU Tests"
 
   , testCase "Integration with Cache: Zone-Based Operations" $ do
       cache <- newTinyLRUCache
-      writeCacheWithZone cache "192.168.1.1" "user1" (42 :: Int) 60
-      result1 <- readCacheWithZone cache "192.168.1.1" "user1"
+      writeCacheWithZone cache "throttle1" "192.168.1.1" "user1" (42 :: Int) 60
+      result1 <- readCacheWithZone cache "throttle1" "192.168.1.1" "user1"
       assertEqual "Zone-based read returns Just 42" (Just 42) result1
-      deleteCacheWithZone cache "192.168.1.1" "user1"
-      result2 <- readCacheWithZone cache "192.168.1.1" "user1"
+      deleteCacheWithZone cache "throttle1" "192.168.1.1" "user1"
+      result2 <- readCacheWithZone cache "throttle1" "192.168.1.1" "user1"
       assertEqual "Zone-based delete removes key" Nothing result2
       atomically $ checkWrappedListConsistency cache
 

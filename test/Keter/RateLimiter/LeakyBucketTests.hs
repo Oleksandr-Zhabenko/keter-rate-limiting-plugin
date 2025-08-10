@@ -287,13 +287,14 @@ tests = testGroup "Leaky Bucket Tests"
       -- Start a purge thread for the LeakyBucketStore
       -- Removed the extra predicate argument, as startCustomPurgeLeakyBucket doesn't take it.
       _ <- startCustomPurgeLeakyBucket leakyBucketMap 60 7200
-      let ipZone = defaultIPZone
+      let throttleName = "test_throttle"  -- Add throttleName parameter
+          ipZone = defaultIPZone
           userKey = "test_user"
           capacity = 2
           leakRate = 1
-      allowed1 <- allowRequest cache ipZone userKey capacity leakRate
+      allowed1 <- allowRequest cache throttleName ipZone userKey capacity leakRate
       assertBool "First request should be allowed" allowed1
-      allowed2 <- allowRequest cache ipZone userKey capacity leakRate
+      allowed2 <- allowRequest cache throttleName ipZone userKey capacity leakRate
       assertBool "Second request should be allowed" allowed2
   , testCase "Direct allowRequest denies request at capacity" $ do
       leakyBucketMap <- atomically StmMap.new
@@ -303,14 +304,15 @@ tests = testGroup "Leaky Bucket Tests"
       -- Start a purge thread for the LeakyBucketStore
       -- Removed the extra predicate argument, as startCustomPurgeLeakyBucket doesn't take it.
       _ <- startCustomPurgeLeakyBucket leakyBucketMap 60 7200
-      let ipZone = defaultIPZone
+      let throttleName = "test_throttle"  -- Add throttleName parameter
+          ipZone = defaultIPZone
           userKey = "test_user"
           capacity = 2
           leakRate = 1
-      allowed1 <- allowRequest cache ipZone userKey capacity leakRate
+      allowed1 <- allowRequest cache throttleName ipZone userKey capacity leakRate
       assertBool "First request should be allowed" allowed1
-      allowed2 <- allowRequest cache ipZone userKey capacity leakRate
+      allowed2 <- allowRequest cache throttleName ipZone userKey capacity leakRate
       assertBool "Second request should be allowed" allowed2
-      allowed3 <- allowRequest cache ipZone userKey capacity leakRate
+      allowed3 <- allowRequest cache throttleName ipZone userKey capacity leakRate
       assertBool "Third request should be denied" (not allowed3)
   ]

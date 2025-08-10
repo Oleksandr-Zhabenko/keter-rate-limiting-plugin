@@ -56,40 +56,40 @@ tests = testGroup "Keter.RateLimiter.IPZones Tests"
   , testCase "incStoreWithZone with IPv4 address" $ do
       store <- createInMemoryStore @'FixedWindow
       let cache = newCache FixedWindow store
-      _ <- incStoreWithZone cache "192.168.1.100" "user123" 60
-      result <- readCacheWithZone cache "192.168.1.100" "user123" :: IO (Maybe Int)
+      _ <- incStoreWithZone cache "test-throttle" "192.168.1.100" "user123" 60
+      result <- readCacheWithZone cache "test-throttle" "192.168.1.100" "user123" :: IO (Maybe Int)
       assertEqual "readCacheWithZone should return Just 1" (Just 1) result
 
   , testCase "incStoreWithZone with IPv6 address" $ do
       store <- createInMemoryStore @'FixedWindow
       let cache = newCache FixedWindow store
-      _ <- incStoreWithZone cache "2001:0db8:0000:0000:0000:0000:0000:0001" "user123" 60
-      result <- readCacheWithZone cache "2001:0db8:0000:0000:0000:0000:0000:0001" "user123" :: IO (Maybe Int)
+      _ <- incStoreWithZone cache "test-throttle" "2001:0db8:0000:0000:0000:0000:0000:0001" "user123" 60
+      result <- readCacheWithZone cache "test-throttle" "2001:0db8:0000:0000:0000:0000:0000:0001" "user123" :: IO (Maybe Int)
       assertEqual "readCacheWithZone should return Just 1" (Just 1) result
 
   , testCase "incStoreWithZone increments existing counter" $ do
       store <- createInMemoryStore @'FixedWindow
       let cache = newCache FixedWindow store
-      _ <- incStoreWithZone cache "192.168.1.100" "user123" 60
-      result <- incStoreWithZone cache "192.168.1.100" "user123" 60
+      _ <- incStoreWithZone cache "test-throttle" "192.168.1.100" "user123" 60
+      result <- incStoreWithZone cache "test-throttle" "192.168.1.100" "user123" 60
       assertEqual "incStoreWithZone should increment to 2" 2 result
 
   , testCase "resetSingleZoneCaches clears all caches" $ do
       zoneCaches <- createZoneCaches
-      _ <- incStoreWithZone (zscCounterCache zoneCaches) "192.168.1.100" "user123" 60
+      _ <- incStoreWithZone (zscCounterCache zoneCaches) "test-throttle" "192.168.1.100" "user123" 60
       _ <- resetSingleZoneCaches zoneCaches
-      result <- readCacheWithZone (zscCounterCache zoneCaches) "192.168.1.100" "user123" :: IO (Maybe Int)
+      result <- readCacheWithZone (zscCounterCache zoneCaches) "test-throttle" "192.168.1.100" "user123" :: IO (Maybe Int)
       assertEqual "Should not retrieve counter after reset" Nothing result
 
   , testCase "incStoreWithZone with expired entry" $ do
       store <- createInMemoryStore @'FixedWindow
       let cache = newCache FixedWindow store
       -- Set a short TTL of 1 second.
-      _ <- incStoreWithZone cache "192.168.1.100" "user123" 1
+      _ <- incStoreWithZone cache "test-throttle" "192.168.1.100" "user123" 1
       -- Wait for the entry to expire.
       liftIO $ threadDelay (2 * 1000000) -- Wait for 2 seconds
       -- Increment again, which should create a new entry.
-      _ <- incStoreWithZone cache "192.168.1.100" "user123" 60
-      result <- readCacheWithZone cache "192.168.1.100" "user123" :: IO (Maybe Int)
+      _ <- incStoreWithZone cache "test-throttle" "192.168.1.100" "user123" 60
+      result <- readCacheWithZone cache "test-throttle" "192.168.1.100" "user123" :: IO (Maybe Int)
       assertEqual "Should retrieve new counter after expiration" (Just 1) result
   ]

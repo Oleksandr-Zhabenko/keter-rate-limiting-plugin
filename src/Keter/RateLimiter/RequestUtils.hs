@@ -1,3 +1,5 @@
+-- file: RequestUtils.hs
+
 {-# LANGUAGE OverloadedStrings #-}
 
 {-|
@@ -79,6 +81,7 @@ module Keter.RateLimiter.RequestUtils
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
+import qualified Data.Text.Encoding.Error as TEE
 import Network.Wai (Request)
 import qualified Network.Wai as WAI
 import Network.Socket
@@ -87,7 +90,7 @@ import Network.Socket
        , HostAddress6
        , hostAddressToTuple
        )
-import Network.HTTP.Types.Header (HeaderName)
+import Network.HTTP.Types.Header (HeaderName, hHost, hUserAgent)
 import Data.Bits ((.&.), shiftR)
 import Data.CaseInsensitive (mk)
 import Numeric (showHex)
@@ -150,33 +153,34 @@ ipv6ToString (w1, w2, w3, w4) =
 -- Unix sockets are represented by their file path.
 getClientIP :: Request -> IO Text
 getClientIP req = do
-  let ipTxt = case lookup (mk "x-forwarded-for") (WAI.requestHeaders req) of
-        Just xff -> T.takeWhile (/= ',') $ TE.decodeUtf8 xff
+  let safeDecode = TE.decodeUtf8With TEE.lenientDecode
+      ipTxt = case lookup (mk "x-forwarded-for") (WAI.requestHeaders req) of
+        Just xff -> T.takeWhile (/= ',') . safeDecode $ xff
         Nothing  -> case lookup (mk "x-real-ip") (WAI.requestHeaders req) of
-          Just rip -> TE.decodeUtf8 rip
+          Just rip -> safeDecode rip
           Nothing  -> case WAI.remoteHost req of
             SockAddrInet  _ addr        -> ipv4ToString addr
             SockAddrInet6 _ _ addr _    -> ipv6ToString addr
             SockAddrUnix   path         -> T.pack path
   pure ipTxt
 
--- | Extracts the raw path info from the request and decodes it as UTF-8 'Text'.
--- This is equivalent to @'TE.decodeUtf8' . 'WAI.rawPathInfo'@.
+-- | Extracts the raw path info from the request and decodes it using lenient UTF-8 'Text'.
+-- This is equivalent to @'TE.decodeUtf8With' 'TEE.lenientDecode' . 'WAI.rawPathInfo'@.
 getRequestPath :: Request -> Text
-getRequestPath = TE.decodeUtf8 . WAI.rawPathInfo
+getRequestPath = TE.decodeUtf8With TEE.lenientDecode . WAI.rawPathInfo
 
 -- | Extracts the HTTP request method (e.g., @"GET"@, @"POST"@) and returns it as a 'Text' value.
--- This is equivalent to @'TE.decodeUtf8' . 'WAI.requestMethod'@.
+-- This is equivalent to @'TE.decodeUtf8' . 'WAI.requestMethod'@ (methods are ASCII).
 getRequestMethod :: Request -> Text
 getRequestMethod = TE.decodeUtf8 . WAI.requestMethod
 
--- | Extracts the value of the @Host@ header, if present.
+-- | Extracts the value of the @Host@ header, if present, using lenient UTF-8 decoding.
 getRequestHost :: Request -> Maybe Text
-getRequestHost = fmap TE.decodeUtf8 . WAI.requestHeaderHost
+getRequestHost = fmap (TE.decodeUtf8With TEE.lenientDecode) . lookup hHost . WAI.requestHeaders
 
--- | Extracts the value of the @User-Agent@ header, if present.
+-- | Extracts the value of the @User-Agent@ header, if present, using lenient UTF-8 decoding.
 getRequestUserAgent :: Request -> Maybe Text
-getRequestUserAgent = fmap TE.decodeUtf8 . WAI.requestHeaderUserAgent
+getRequestUserAgent = fmap (TE.decodeUtf8With TEE.lenientDecode) . lookup hUserAgent . WAI.requestHeaders
 
 ----------------------------------------------------------------------
 -- Composite key builders
@@ -245,4 +249,4 @@ byHeaderAndIP :: HeaderName -> Request -> IO (Maybe Text)
 byHeaderAndIP headerName req = do
   ip <- getClientIP req
   let mVal = lookup headerName (WAI.requestHeaders req)
-  pure $ fmap (\hv -> ip <> ":" <> TE.decodeUtf8 hv) mVal
+  pure $ fmap (\hv -> ip <> ":" <> TE.decodeUtf8With TEE.lenientDecode hv) mVal

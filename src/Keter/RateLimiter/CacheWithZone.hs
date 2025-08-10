@@ -67,6 +67,8 @@ allowFixedWindowRequest
   :: Cache (InMemoryStore 'FixedWindow)
   -- ^ FixedWindow-based cache handle
   -> Text
+  -- ^ Throttle name
+  -> Text
   -- ^ IP zone or tenant key
   -> Text
   -- ^ User key
@@ -76,8 +78,8 @@ allowFixedWindowRequest
   -- ^ Period in seconds
   -> IO Bool
   -- ^ Whether the request is allowed
-allowFixedWindowRequest cache ipZone userKey limit period = do
-  count <- incStoreWithZone cache ipZone userKey period
+allowFixedWindowRequest cache throttleName ipZone userKey limit period = do
+  count <- incStoreWithZone cache throttleName ipZone userKey period
   return $ count <= limit
 
 --------------------------------------------------------------------------------
@@ -95,6 +97,8 @@ incStoreWithZone
   => Cache store
   -- ^ Cache with algorithm-specific store
   -> Text
+  -- ^ Throttle name
+  -> Text
   -- ^ IP zone
   -> Text
   -- ^ User key
@@ -102,8 +106,8 @@ incStoreWithZone
   -- ^ TTL (seconds)
   -> IO v
   -- ^ New counter value
-incStoreWithZone cache ipZone userKey expiresIn = do
-  let key = makeCacheKey (cacheAlgorithm cache) ipZone userKey
+incStoreWithZone cache throttleName ipZone userKey expiresIn = do
+  let key = makeCacheKey throttleName (cacheAlgorithm cache) ipZone userKey
       prefix = algorithmPrefix (cacheAlgorithm cache)
   incStore (cacheStore cache) prefix key expiresIn
 
@@ -115,13 +119,15 @@ readCacheWithZone
   => Cache store
   -- ^ Cache handle
   -> Text
+  -- ^ Throttle name
+  -> Text
   -- ^ IP zone
   -> Text
   -- ^ User key
   -> IO (Maybe v)
   -- ^ Optional stored value
-readCacheWithZone cache ipZone userKey = do
-  let key = makeCacheKey (cacheAlgorithm cache) ipZone userKey
+readCacheWithZone cache throttleName ipZone userKey = do
+  let key = makeCacheKey throttleName (cacheAlgorithm cache) ipZone userKey
       prefix = algorithmPrefix (cacheAlgorithm cache)
   readStore (cacheStore cache) prefix key
 
@@ -133,6 +139,8 @@ writeCacheWithZone
   => Cache store
   -- ^ Cache handle
   -> Text
+  -- ^ Throttle name
+  -> Text
   -- ^ IP zone
   -> Text
   -- ^ User key
@@ -141,8 +149,8 @@ writeCacheWithZone
   -> Int
   -- ^ Expiration in seconds
   -> IO ()
-writeCacheWithZone cache ipZone userKey val expiresIn = do
-  let key = makeCacheKey (cacheAlgorithm cache) ipZone userKey
+writeCacheWithZone cache throttleName ipZone userKey val expiresIn = do
+  let key = makeCacheKey throttleName (cacheAlgorithm cache) ipZone userKey
       prefix = algorithmPrefix (cacheAlgorithm cache)
   writeStore (cacheStore cache) prefix key val expiresIn
 
@@ -154,11 +162,13 @@ deleteCacheWithZone
   => Cache store
   -- ^ Cache handle
   -> Text
+  -- ^ Throttle name
+  -> Text
   -- ^ IP zone
   -> Text
   -- ^ User key
   -> IO ()
-deleteCacheWithZone cache ipZone userKey = do
-  let key = makeCacheKey (cacheAlgorithm cache) ipZone userKey
+deleteCacheWithZone cache throttleName ipZone userKey = do
+  let key = makeCacheKey throttleName (cacheAlgorithm cache) ipZone userKey
       prefix = algorithmPrefix (cacheAlgorithm cache)
   deleteStore (cacheStore cache) prefix key

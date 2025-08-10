@@ -70,99 +70,58 @@ minTTL = 2
 -- - @refillRate@: tokens added per second (can be fractional).
 -- - @expiresIn@: TTL in seconds; determines how long idle buckets live.
 --
--- == Parameters
---
--- [@cache@] The configured cache for storing per-user token bucket state.
--- [@ipZone@] A label identifying the IP zone (e.g., region or tenant).
--- [@userKey@] A unique identifier for the user (e.g., IP address or token).
--- [@capacity@] Maximum tokens the bucket can hold.
--- [@refillRate@] Token refill rate (tokens per second).
--- [@expiresIn@] Time-to-live for idle entries in seconds.
---
--- == Returns
---
--- A boolean in an arbitrary `MonadIO` context indicating whether the request is allowed.
---
--- == Example
---
--- > allowed <- allowRequest cache "zoneA" "192.168.0.1" 5 1.0 60
--- > when allowed $ putStrLn "Proceeding with request..."
 allowRequest
   :: MonadIO m
   => Cache (InMemoryStore 'TokenBucket)
-  -- ^ Token bucket cache backend
   -> Text
-  -- ^ IP zone (e.g. region or customer identifier)
   -> Text
-  -- ^ User key (e.g. IP address or API token)
+  -> Text
   -> Int
-  -- ^ Bucket capacity (max number of tokens)
   -> Double
-  -- ^ Refill rate (tokens per second)
   -> Int
-  -- ^ TTL (seconds) for the bucket state
   -> m Bool
-allowRequest cache ipZone userKey capacity refillRate expiresIn = liftIO $
+allowRequest cache throttleName ipZone userKey capacity refillRate expiresIn = liftIO $
   if expiresIn < minTTL
      then do
-       putStrLn $
-         "TokenBucket: Request denied due to invalid TTL: "
-           ++ show expiresIn
        pure False
      else do
        now <- floor <$> getPOSIXTime
-       let key                     = makeCacheKey (cacheAlgorithm cache) ipZone userKey
+       let key = makeCacheKey throttleName (cacheAlgorithm cache) ipZone userKey
            TokenBucketStore tvBuckets = cacheStore cache
        replyVar <- newEmptyMVar
-
-       ----------------------------------------------------------------------
-       -- 1. Obtain (or create) bucket entry and enqueue the request.
-       -- Create the entry in IO, then pass it into the STM transaction.
        newEntryInitialState <- createTokenBucketEntry (TokenBucketState (capacity - 1) now)
        
        (wasNew, entry) <- atomically $ do
          buckets <- readTVar tvBuckets
-         -- Use F.Focus directly to allow STM actions in the handler, bypassing F.cases.
          (wasNewEntry, ent) <-
            StmMap.focus
              (F.Focus
-                -- Handler for when the key is NOT found (the "Nothing" case)
                 (pure ((True, newEntryInitialState), F.Set newEntryInitialState))
-                -- Handler for when the key IS found (the "Just" case)
                 (\existingEnt -> do
-                  -- This handler can now perform STM actions.
                   workerLockEmpty <- isEmptyTMVar (tbeWorkerLock existingEnt)
                   if workerLockEmpty
-                    then pure ((True, newEntryInitialState), F.Set newEntryInitialState)  -- Replace dead entry
-                    else pure ((False, existingEnt), F.Leave)     -- Keep existing entry
+                    then pure ((True, newEntryInitialState), F.Set newEntryInitialState)
+                    else pure ((False, existingEnt), F.Leave)
                 )
              )
              key buckets
          pure (wasNewEntry, ent)
-
-       ----------------------------------------------------------------------
-       -- 2. Spawn a worker once for a fresh bucket.
        if wasNew
          then
-           -- For a new bucket, the first request is allowed only if there is capacity.
            if capacity > 0
              then do
                workerReadyVar <- atomically newEmptyTMVar
-               atomically $ putTMVar (tbeWorkerLock entry) () -- Mark worker lock as taken
-               -- Start the worker with ready synchronization
+               atomically $ putTMVar (tbeWorkerLock entry) ()
                startTokenBucketWorker (tbeState entry)
                                       (tbeQueue entry)
                                       capacity
                                       refillRate
                                       workerReadyVar
-               -- Wait for the worker to signal it's ready before proceeding
                atomically $ takeTMVar workerReadyVar
                pure True
-             else do
-               -- If capacity is 0, no request can ever be allowed.
+             else
                pure False
          else do
-           -- For existing buckets, enqueue the request and wait for response
            atomically $ writeTQueue (tbeQueue entry) replyVar
            result <- takeMVar replyVar
            pure result

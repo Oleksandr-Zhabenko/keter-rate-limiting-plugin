@@ -277,10 +277,10 @@ tests = testGroup "Sliding Window Tests"
       let TimestampStore tvar = cacheStore cacheInstance
 
       -- First two calls should be allowed.
-      allowed1 <- allowRequest getFakeTime tvar (T.pack ipZone) (T.pack userKey) window limit
-      allowed2 <- allowRequest getFakeTime tvar (T.pack ipZone) (T.pack userKey) window limit
+      allowed1 <- allowRequest getFakeTime tvar (T.pack "test_throttle") (T.pack ipZone) (T.pack userKey) window limit
+      allowed2 <- allowRequest getFakeTime tvar (T.pack "test_throttle") (T.pack ipZone) (T.pack userKey) window limit
       -- Third call should be blocked as the window is full.
-      allowed3 <- allowRequest getFakeTime tvar (T.pack ipZone) (T.pack userKey) window limit
+      allowed3 <- allowRequest getFakeTime tvar (T.pack "test_throttle") (T.pack ipZone) (T.pack userKey) window limit
 
       assertBool "First request should be allowed" allowed1
       assertBool "Second request should be allowed" allowed2
@@ -290,6 +290,6 @@ tests = testGroup "Sliding Window Tests"
       advanceTime 3.0
 
       -- This new request should now be allowed.
-      allowed4 <- allowRequest getFakeTime tvar (T.pack ipZone) (T.pack userKey) window limit
+      allowed4 <- allowRequest getFakeTime tvar (T.pack "test_throttle") (T.pack ipZone) (T.pack userKey) window limit
       assertBool "After advancing time, a new request should be allowed" allowed4
   ]

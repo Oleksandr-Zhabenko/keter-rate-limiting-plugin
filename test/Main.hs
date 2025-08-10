@@ -57,12 +57,11 @@ module Main (
 
 import Control.Concurrent.STM (atomically, readTVar)
 import Control.Concurrent (threadDelay)
-import Control.Exception (try, SomeException)
 import Control.Monad (when)
 import Data.Maybe (isJust)
 import Data.IORef (readIORef)
 import Data.Cache (purgeExpired)
-import Test.Tasty (TestTree, defaultMain, testGroup)
+import Test.Tasty (TestTree, defaultMain, testGroup, after, DependencyType(..))
 import Test.Tasty.HUnit (testCase, assertEqual, assertFailure)
 import qualified Data.HashMap.Strict as HashMap
 import Data.Text (Text)
@@ -181,11 +180,7 @@ executeRequests env requests expectedResponses = do
 -- | The main entry point for running the test suite.
 -- It aggregates all tests and runs them using Tasty.
 main :: IO ()
-main = do
-  result <- try @SomeException $ defaultMain mainTests
-  case result of
-    Left ex -> putStrLn $ "Test suite failed with exception: " ++ show ex
-    Right () -> putStrLn "Test suite completed successfully"
+main = defaultMain $ after AllSucceed "All tests passed" mainTests
 
 -- | The root 'TestTree' that combines all test groups from the library.
 mainTests :: TestTree
@@ -423,7 +418,7 @@ testTimeBasedReset = do
     Nothing -> assertFailure "Zone caches not found" >> return undefined
   let cache :: Cache (InMemoryStore 'FixedWindow)
       cache = zscCounterCache zoneCaches
-      key = makeCacheKey FixedWindow testIPZoneA (unsafePerformIO $ RequestUtils.getClientIP req)
+      key = makeCacheKey "reset-throttle" FixedWindow testIPZoneA (unsafePerformIO $ RequestUtils.getClientIP req)
   mVal <- readCache cache key :: IO (Maybe Int)
   when (isJust mVal) $ putStrLn $ "Cache value before third request: " ++ show mVal
   -- Try manually deleting if it exists
@@ -524,10 +519,11 @@ testIncStoreWithZone = do
   store <- createInMemoryStore @'FixedWindow
   let cache :: Cache (InMemoryStore 'FixedWindow)
       cache = newCache FixedWindow store
+      throttleName = "test-throttle"
       ipZone = "zoneX"
       userKey = "userX"
-  v1 <- incStoreWithZone cache ipZone userKey 10 :: IO Int
-  v2 <- incStoreWithZone cache ipZone userKey 10 :: IO Int
+  v1 <- incStoreWithZone cache throttleName ipZone userKey 10 :: IO Int
+  v2 <- incStoreWithZone cache throttleName ipZone userKey 10 :: IO Int
   assertEqual "First increment (wrapper)" 1 v1
   assertEqual "Second increment (wrapper)" 2 v2
 
@@ -549,11 +545,12 @@ testReadWriteCacheWithZone = do
   store <- createInMemoryStore @'FixedWindow
   let cache :: Cache (InMemoryStore 'FixedWindow)
       cache = newCache FixedWindow store
+      throttleName = "test-throttle"
       ipZone = "zoneZ"
       userKey = "userZ"
       val = 42 :: Int
-  writeCacheWithZone cache ipZone userKey val 10
-  mVal <- readCacheWithZone cache ipZone userKey :: IO (Maybe Int)
+  writeCacheWithZone cache throttleName ipZone userKey val 10
+  mVal <- readCacheWithZone cache throttleName ipZone userKey :: IO (Maybe Int)
   assertEqual "Read after write (wrapper)" (Just val) mVal
 
 -- | Tests the lower-level 'writeCache' and 'readCache' functions with a manually constructed key.

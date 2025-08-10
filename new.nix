@@ -10,11 +10,12 @@ pkgs.haskellPackages.mkDerivation {
     bytestring 
     cache 
     clock 
-    containers
+#    containers
     hashable 
     http-types 
     network 
     text 
+    cookie
     case-insensitive 
     network 
     focus
@@ -29,12 +30,15 @@ pkgs.haskellPackages.mkDerivation {
   testHaskellDepends = with pkgs.haskellPackages; [
     base 
     bytestring 
-    containers 
+#    containers 
     unordered-containers
     http-types 
     network 
     tasty 
     HUnit 
+    QuickCheck
+    cookie
+    tasty-quickcheck
     case-insensitive
     tasty-hunit 
     wai-extra 

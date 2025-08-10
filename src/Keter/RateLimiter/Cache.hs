@@ -1209,22 +1209,6 @@ resetStoreWith tvar = do
 -- efficient organization of rate limiting data. The key format follows
 -- a consistent pattern across all algorithms.
 --
--- ==== Key Format
---
--- @
--- "algorithm_prefix:ip_zone:user_key"
--- @
---
--- ==== Examples
---
--- @
--- makeCacheKey TokenBucket "api" "user123"
--- -- Result: "token_bucket:api:user123"
---
--- makeCacheKey FixedWindow "web" "192.168.1.1"  
--- -- Result: "rate_limiter:web:192.168.1.1"
--- @
---
 -- ==== Use Cases
 --
 -- * __Multi-tenant Applications__: Separate rate limits per tenant
@@ -1238,11 +1222,15 @@ resetStoreWith tvar = do
 -- * __Query Efficiency__: Pattern-based queries and cleanup
 -- * __Debugging__: Clear key structure aids troubleshooting
 -- * __Monitoring__: Easy to aggregate metrics by zone or user type
-makeCacheKey :: Algorithm  -- ^ Rate limiting algorithm for prefix
-             -> Text       -- ^ IP zone or service identifier (e.g., "api", "web", "zone1")
-             -> Text       -- ^ User key (e.g., API key, user ID, IP address)
-             -> Text       -- ^ Complete hierarchical cache key
-makeCacheKey algo ipZone userKey = algorithmPrefix algo <> ":" <> ipZone <> ":" <> userKey
+
+-- | Compose a unique cache key including throttle name for isolation.
+makeCacheKey :: Text  -- ^ Throttle name (unique per rule)
+             -> Algorithm
+             -> Text       -- ^ IP zone
+             -> Text       -- ^ User key
+             -> Text
+makeCacheKey throttleName algo ipZone userKey =
+  algoToText algo <> ":" <> throttleName <> ":" <> ipZone <> ":" <> userKey
 
 -- | Convert an Algorithm value to its canonical Text representation.
 --
