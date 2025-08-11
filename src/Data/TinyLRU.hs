@@ -145,8 +145,11 @@ data TinyLRUCache s = TinyLRUCache
 -- lruCache <- atomically $ initTinyLRU 1000
 -- @
 --
--- @param cap The maximum number of items the cache can hold. Must be > 0.
--- @return An 'STM' action that yields a new, empty 'TinyLRUCache'.
+-- The capacity must be greater than 0.
+--
+-- * 'cap' - The maximum number of items the cache can hold. Must be > 0.
+-- 
+-- Returns an 'STM' action that yields a new, empty 'TinyLRUCache'.
 initTinyLRU :: Int -> STM (TinyLRUCache s)
 initTinyLRU cap = do
   cache <- Map.new
@@ -160,9 +163,10 @@ mkExpiry now ttl | ttl <= 0 = Nothing
 
 -- | Checks if a cache node is expired relative to the current time.
 --
--- @param now The current 'TimeSpec'.
--- @param node The 'LRUNode' to check.
--- @return 'True' if the node is expired, 'False' otherwise.
+-- * 'now' - The current 'TimeSpec'.
+-- * 'node' - The 'LRUNode' to check.
+--
+-- Returns 'True' if the node is expired, 'False' otherwise.
 isExpired :: TimeSpec -> LRUNode s -> Bool
 isExpired now node =
   case nodeExpiry node of
@@ -173,8 +177,8 @@ isExpired now node =
 -- It correctly updates the 'nodePrev' and 'nodeNext' pointers of the
 -- neighboring nodes and the list's 'lruHead' and 'lruTail' pointers if necessary.
 --
--- @param listTVar The 'TVar' of the 'LRUList' from which to remove the node.
--- @param nodeTVar The 'TVar' of the 'LRUNode' to remove.
+-- * 'listTVar' - The 'TVar' of the 'LRUList' from which to remove the node.
+-- * 'nodeTVar' - The 'TVar' of the 'LRUNode' to remove.
 removeNode :: TVar (LRUList s) -> TVar (LRUNode s) -> STM ()
 removeNode listTVar nodeTVar = do
   node <- readTVar nodeTVar
@@ -194,12 +198,13 @@ removeNode listTVar nodeTVar = do
 -- | Creates a new node and adds it to the front (most recently used position)
 -- of the cache's linked list.
 --
--- @param now The current 'TimeSpec', used for calculating expiry.
--- @param ttl The time-to-live in seconds. A value `<= 0` means it never expires.
--- @param cache The 'TinyLRUCache' instance.
--- @param key The key for the new entry.
--- @param value The 'ByteString' value for the new entry.
--- @return The 'TVar' of the newly created 'LRUNode'.
+-- * 'now' - The current 'TimeSpec', used for calculating expiry.
+-- * 'ttl' - The time-to-live in seconds. A value <= 0 means it never expires.
+-- * 'cache' - The 'TinyLRUCache' instance.
+-- * 'key' - The key for the new entry.
+-- * 'value' - The 'ByteString' value for the new entry.
+--
+-- Returns the 'TVar' of the newly created 'LRUNode'.
 addToFront :: TimeSpec -> Int -> TinyLRUCache s -> Text -> ByteString -> STM (TVar (LRUNode s))
 addToFront now ttl cache key value = do
   let expiry = mkExpiry now ttl
@@ -218,8 +223,8 @@ addToFront now ttl cache key value = do
 -- | Moves an existing node to the front of the linked list, marking it as the
 -- most recently used. This is a core operation for the LRU logic.
 --
--- @param listTVar The 'TVar' of the 'LRUList'.
--- @param nodeTVar The 'TVar' of the 'LRUNode' to move.
+-- * 'listTVar' - The 'TVar' of the 'LRUList'.
+-- * 'nodeTVar' - The 'TVar' of the 'LRUNode' to move.
 moveToFront :: TVar (LRUList s) -> TVar (LRUNode s) -> STM ()
 moveToFront listTVar nodeTVar = do
   list <- readTVar listTVar
@@ -240,7 +245,7 @@ moveToFront listTVar nodeTVar = do
 -- | Evicts the least recently used item from the cache. This involves removing
 -- the tail of the linked list and deleting the corresponding entry from the hash map.
 --
--- @param cache The 'TinyLRUCache' to perform eviction on.
+-- * 'cache' - The 'TinyLRUCache' to perform eviction on.
 evictLRU :: TinyLRUCache s -> STM ()
 evictLRU cache = do
   list <- readTVar (lruList cache)
@@ -256,8 +261,8 @@ addTTL (TimeSpec s ns) ttl = TimeSpec (s + fromIntegral (max 0 ttl)) ns
 -- | Deletes an entry from the cache by its key.
 -- This removes the item from both the internal map and the linked list.
 --
--- @param key The key of the item to delete.
--- @param cache The 'TinyLRUCache' instance.
+-- * 'key' - The key of the item to delete.
+-- * 'cache' - The 'TinyLRUCache' instance.
 deleteKey :: Text -> TinyLRUCache s -> STM ()
 deleteKey key cache = do
   mNodeTVar <- Map.lookup key (lruCache cache)
@@ -280,21 +285,22 @@ cleanupExpired now cache = do
 --
 -- The logic is as follows:
 --
--- 1.  It first cleans up any expired items in the cache.
--- 2.  It looks for the key.
--- 3.  If the key exists and is not expired, it moves the item to the front (as it's now
---     the most recently used) and returns its value wrapped in 'Just'.
--- 4.  If the key does not exist, or if it exists but has expired, it inserts the
---     provided new value. If the cache is full, it evicts the least recently used
---     item before insertion. It then returns the new value wrapped in 'Just'.
--- 5.  If the key is invalid (empty or too long), it returns 'Nothing'.
+-- 1. It first cleans up any expired items in the cache.
+-- 2. It looks for the key.
+-- 3. If the key exists and is not expired, it moves the item to the front (as it's now
+--    the most recently used) and returns its value wrapped in 'Just'.
+-- 4. If the key does not exist, or if it exists but has expired, it inserts the
+--    provided new value. If the cache is full, it evicts the least recently used
+--    item before insertion. It then returns the new value wrapped in 'Just'.
+-- 5. If the key is invalid (empty or longer than 256 characters), it returns 'Nothing'.
 --
--- @param now The current 'TimeSpec', for expiry checks.
--- @param key The key to look up. Length must be between 1 and 256.
--- @param val The value to insert if the key is not found. It must have 'ToJSON' and 'FromJSON' instances.
--- @param ttl The time-to-live in seconds for the new entry if it's inserted.
--- @param cache The 'TinyLRUCache' instance.
--- @return An 'STM' action that yields 'Just' the value (either existing or newly inserted), or 'Nothing' if the key is invalid.
+-- * 'now' - The current 'TimeSpec', for expiry checks.
+-- * 'key' - The key to look up. Length must be between 1 and 256 characters.
+-- * 'val' - The value to insert if the key is not found. It must have 'ToJSON' and 'FromJSON' instances.
+-- * 'ttl' - The time-to-live in seconds for the new entry if it's inserted.
+-- * 'cache' - The 'TinyLRUCache' instance.
+--
+-- Returns an 'STM' action that yields 'Just' the value (either existing or newly inserted), or 'Nothing' if the key is invalid.
 access :: forall a s. (FromJSON a, ToJSON a) => TimeSpec -> Text -> a -> Int -> TinyLRUCache s -> STM (Maybe a)
 access now key val ttl cache
   | T.null key || T.length key > 256 = return Nothing
@@ -331,21 +337,22 @@ access now key val ttl cache
 --
 -- The logic is as follows:
 --
--- 1.  It first cleans up any expired items in the cache.
--- 2.  It looks for the key.
--- 3.  If the key exists, it updates the value and expiry time, and moves it to the front.
--- 4.  If the key does not exist, it inserts the new value. If the cache is full, it
---     evicts the least recently used item first.
--- 5.  If the key is invalid (empty or too long), it returns 'Nothing'.
+-- 1. It first cleans up any expired items in the cache.
+-- 2. It looks for the key.
+-- 3. If the key exists, it updates the value and expiry time, and moves it to the front.
+-- 4. If the key does not exist, it inserts the new value. If the cache is full, it
+--    evicts the least recently used item first.
+-- 5. If the key is invalid (empty or longer than 256 characters), it returns 'Nothing'.
 --
 -- Unlike 'access', this function /always/ writes the provided value.
 --
--- @param now The current 'TimeSpec', for expiry calculations.
--- @param key The key to update or insert. Length must be between 1 and 256.
--- @param val The new value to write. It must have 'ToJSON' and 'FromJSON' instances.
--- @param ttl The new time-to-live in seconds for the entry.
--- @param cache The 'TinyLRUCache' instance.
--- @return An 'STM' action that yields 'Just' the value that was written, or 'Nothing' if the key is invalid.
+-- * 'now' - The current 'TimeSpec', for expiry calculations.
+-- * 'key' - The key to update or insert. Length must be between 1 and 256 characters.
+-- * 'val' - The new value to write. It must have 'ToJSON' and 'FromJSON' instances.
+-- * 'ttl' - The new time-to-live in seconds for the entry.
+-- * 'cache' - The 'TinyLRUCache' instance.
+--
+-- Returns an 'STM' action that yields 'Just' the value that was written, or 'Nothing' if the key is invalid.
 updateValue :: forall a s. (FromJSON a, ToJSON a) => TimeSpec -> Text -> a -> Int -> TinyLRUCache s -> STM (Maybe a)
 updateValue now key val ttl cache
   | T.null key || T.length key > 256 = return Nothing
@@ -373,7 +380,7 @@ updateValue now key val ttl cache
 
 -- | Resets the cache, removing all entries.
 --
--- @param cache The 'TinyLRUCache' to reset.
+-- * 'cache' - The 'TinyLRUCache' to reset.
 resetTinyLRU :: TinyLRUCache s -> STM ()
 resetTinyLRU cache = do
   Map.reset (lruCache cache)
@@ -384,20 +391,21 @@ resetTinyLRU cache = do
 --
 -- The logic is as follows:
 --
--- 1.  It looks for the key. The value associated with the key is treated as a counter ('Int').
--- 2.  If the entry for the key exists and is not expired:
---     *   If the counter is less than the 'limit', it increments the counter,
---         refreshes the expiry time, and returns 'True' (request allowed).
---     *   If the counter has reached the 'limit', it does nothing and returns 'False' (request denied).
--- 3.  If the entry does not exist or has expired, it creates a new entry with the
---     counter set to 1 and returns 'True'.
+-- 1. It looks for the key. The value associated with the key is treated as a counter ('Int').
+-- 2. If the entry for the key exists and is not expired:
+--    * If the counter is less than the 'limit', it increments the counter,
+--      refreshes the expiry time, and returns 'True' (request allowed).
+--    * If the counter has reached the 'limit', it does nothing and returns 'False' (request denied).
+-- 3. If the entry does not exist or has expired, it creates a new entry with the
+--    counter set to 1 and returns 'True'.
 --
--- @param now The current 'TimeSpec'.
--- @param cache The 'TinyLRUCache' instance.
--- @param key The key to identify the entity being rate-limited (e.g., a user ID or IP address).
--- @param limit The maximum number of requests allowed.
--- @param period The time period in seconds for the rate limit window.
--- @return An 'STM' action yielding 'True' if the request is allowed, 'False' otherwise.
+-- * 'now' - The current 'TimeSpec'.
+-- * 'cache' - The 'TinyLRUCache' instance.
+-- * 'key' - The key to identify the entity being rate-limited (e.g., a user ID or IP address).
+-- * 'limit' - The maximum number of requests allowed.
+-- * 'period' - The time period in seconds for the rate limit window.
+--
+-- Returns an 'STM' action yielding 'True' if the request is allowed, 'False' otherwise.
 allowRequestTinyLRU :: TimeSpec -> TinyLRUCache s -> Text -> Int -> Int -> STM Bool
 allowRequestTinyLRU now cache key limit period
   | T.null key = return False
@@ -443,8 +451,8 @@ allowRequestTinyLRU now cache key limit period
 -- | Low-level function to remove a node from the cache's list.
 -- Alias for 'removeNode'. Most users should use 'deleteKey' instead.
 --
--- @param cache The 'TinyLRUCache' instance.
--- @param nodeTVar The 'TVar' of the 'LRUNode' to remove.
+-- * 'cache' - The 'TinyLRUCache' instance.
+-- * 'nodeTVar' - The 'TVar' of the 'LRUNode' to remove.
 removeNodeFromCache :: TinyLRUCache s -> TVar (LRUNode s) -> STM ()
 removeNodeFromCache cache = removeNode (lruList cache)
 
@@ -452,7 +460,7 @@ removeNodeFromCache cache = removeNode (lruList cache)
 -- Alias for 'moveToFront'. Most users should use 'access' or 'updateValue' which
 -- call this internally.
 --
--- @param cache The 'TinyLRUCache' instance.
--- @param nodeTVar The 'TVar' of the 'LRUNode' to move.
+-- * 'cache' - The 'TinyLRUCache' instance.
+-- * 'nodeTVar' - The 'TVar' of the 'LRUNode' to move.
 moveToFrontInCache :: TinyLRUCache s -> TVar (LRUNode s) -> STM ()
 moveToFrontInCache cache = moveToFront (lruList cache)

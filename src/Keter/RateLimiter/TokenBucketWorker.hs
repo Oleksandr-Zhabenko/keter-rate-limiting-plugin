@@ -47,7 +47,7 @@ initialState <- newTVarIO $ TokenBucketState 100 now
 requestQueue <- newTBroadcastTQueueIO
 readySignal <- newEmptyTMVarIO
 
--- Start worker: 100 token capacity, 10 tokens/second refill rate
+-- Start worker: 100 token capacity, 10 tokens\/second refill rate
 startTokenBucketWorker initialState requestQueue 100 10.0 readySignal
 
 -- Wait for worker to be ready
@@ -90,13 +90,13 @@ import Control.Concurrent.MVar (MVar, putMVar)
 -- Each request is handled atomically: the bucket state is read, tokens are refilled
 -- based on elapsed time, a token is consumed if available, and the new state is written back.
 --
--- ==== Worker Lifecycle
+-- === Worker Lifecycle
 --
 -- 1. __Startup__: Worker thread is forked and signals readiness via 'TMVar'
 -- 2. __Processing Loop__: Worker waits for requests, processes them atomically
 -- 3. __Response__: Results are sent back to clients via 'MVar'
 --
--- ==== Token Refill Algorithm
+-- === Token Refill Algorithm
 --
 -- Tokens are refilled using the formula:
 --
@@ -105,11 +105,12 @@ import Control.Concurrent.MVar (MVar, putMVar)
 -- @
 --
 -- This ensures:
+--
 -- * Tokens are added proportionally to elapsed time
 -- * Bucket capacity is never exceeded
 -- * Sub-second precision for refill calculations
 --
--- ==== Atomic Request Processing
+-- === Atomic Request Processing
 --
 -- Each request is processed in a single STM transaction that:
 --
@@ -118,9 +119,9 @@ import Control.Concurrent.MVar (MVar, putMVar)
 -- 3. Computes available tokens after refill
 -- 4. Attempts to consume one token if available
 -- 5. Updates bucket state with new token count and timestamp
--- 6. Returns allow/deny decision
+-- 6. Returns allow\/deny decision
 --
--- ==== Error Handling
+-- === Error Handling
 --
 -- The worker is designed to be resilient:
 --
@@ -128,12 +129,12 @@ import Control.Concurrent.MVar (MVar, putMVar)
 -- * Negative elapsed time (clock adjustments) results in no refill
 -- * Worker continues running even if individual requests fail
 --
--- ==== Example
+-- ==== __Examples__
 --
 -- @
--- -- Create a bucket for API rate limiting: 1000 requests/hour = ~0.278 req/sec
+-- -- Create a bucket for API rate limiting: 1000 requests\/hour = ~0.278 req\/sec
 -- let capacity = 100              -- Allow bursts up to 100 requests
---     refillRate = 1000.0 / 3600.0 -- 1000 requests per hour
+--     refillRate = 1000.0 \/ 3600.0 -- 1000 requests per hour
 --
 -- initialState <- newTVarIO $ TokenBucketState capacity now
 -- requestQueue <- newTBroadcastTQueueIO  
@@ -142,15 +143,15 @@ import Control.Concurrent.MVar (MVar, putMVar)
 -- startTokenBucketWorker initialState requestQueue capacity refillRate readySignal
 -- @
 --
--- __Thread Safety:__ All state updates are atomic via STM transactions.
+-- /Thread Safety:/ All state updates are atomic via STM transactions.
 --
--- __Resource Usage:__ Creates one background thread that runs indefinitely.
+-- /Resource Usage:/ Creates one background thread that runs indefinitely.
 startTokenBucketWorker
   :: TVar TokenBucketState  -- ^ Shared bucket state (tokens + last update time).
                             --   This 'TVar' is read and updated atomically by the worker.
   -> TQueue (MVar Bool)     -- ^ Request queue containing 'MVar's for client responses.
                             --   Clients place their response 'MVar' in this queue and wait
-                            --   for the worker to write the allow/deny decision.
+                            --   for the worker to write the allow\/deny decision.
   -> Int                    -- ^ Maximum bucket capacity (maximum tokens that can be stored).
                             --   This sets the upper limit for burst traffic handling.
                             --   Must be positive.

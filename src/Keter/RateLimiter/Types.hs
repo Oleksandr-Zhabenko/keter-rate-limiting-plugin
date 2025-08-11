@@ -22,7 +22,7 @@ It defines state representations for two common rate limiting algorithms:
 Both types support JSON serialization for persistence and configuration purposes,
 with validation to ensure state consistency.
 
-== Example Usage
+= Example Usage
 
 @
 -- Token bucket example
@@ -51,19 +51,19 @@ import GHC.Generics (Generic)
 -- Each incoming request consumes one or more tokens from the bucket. Tokens are replenished
 -- at a fixed rate. If insufficient tokens are available, the request is either delayed or rejected.
 --
--- ==== Token Bucket Properties
+-- == Token Bucket Properties
 --
 -- * __Bursty Traffic__: Allows bursts of traffic up to the bucket capacity
 -- * __Rate Control__: Long-term average rate is controlled by token replenishment rate
 -- * __Memory Efficient__: Only requires tracking token count and last update time
 --
--- ==== Use Cases
+-- == Use Cases
 --
 -- * API rate limiting with burst allowance
 -- * Network traffic shaping
 -- * Resource allocation with temporary overages
 --
--- ==== Example
+-- = Example
 --
 -- @
 -- -- Initial state with 50 tokens, last updated at Unix timestamp 1640995200
@@ -88,7 +88,7 @@ data TokenBucketState = TokenBucketState
 --
 -- Serializes the token bucket state to JSON format for persistence or network transmission.
 --
--- ==== JSON Format
+-- = JSON Format
 --
 -- @
 -- {
@@ -102,10 +102,10 @@ instance ToJSON TokenBucketState
 --
 -- Deserializes JSON to 'TokenBucketState' with the following validation rules:
 --
--- * @tokens@ field must be non-negative (>= 0)
--- * @lastUpdate@ field must be present and parseable as 'Int'
+-- * 'tokens' field must be non-negative (>= 0)
+-- * 'lastUpdate' field must be present and parseable as 'Int'
 --
--- ==== Validation Examples
+-- = Validation Examples
 --
 -- @
 -- -- Valid JSON
@@ -117,7 +117,7 @@ instance ToJSON TokenBucketState
 -- -- Nothing
 -- @
 --
--- __Throws:__ Parse error if @tokens@ is negative or required fields are missing.
+-- Throws a parse error if 'tokens' is negative or required fields are missing.
 instance FromJSON TokenBucketState where
   parseJSON = withObject "TokenBucketState" $ \o -> do
     tokens <- o .: "tokens"
@@ -131,20 +131,20 @@ instance FromJSON TokenBucketState where
 -- at a constant rate. Incoming requests add water to the bucket, and if the bucket
 -- overflows, requests are rejected. This provides smooth rate limiting without bursts.
 --
--- ==== Leaky Bucket Properties
+-- == Leaky Bucket Properties
 --
 -- * __Smooth Rate__: Enforces a consistent output rate regardless of input bursts
 -- * __No Bursts__: Unlike token bucket, doesn't allow temporary rate exceedance  
 -- * __Queue Modeling__: Can model request queuing with bucket level representing queue depth
 --
--- ==== Use Cases
+-- == Use Cases
 --
 -- * Smooth traffic shaping for network connections
 -- * Audio/video streaming rate control
 -- * Database connection throttling
 -- * Prevention of thundering herd problems
 --
--- ==== Mathematical Model
+-- = Mathematical Model
 --
 -- The bucket level changes according to:
 --
@@ -153,11 +153,12 @@ instance FromJSON TokenBucketState where
 -- @
 --
 -- Where:
--- * @requestSize@ is the size of the incoming request
--- * @drainRate@ is the constant drain rate (requests per second)
--- * @timeDelta@ is the elapsed time since last update
 --
--- ==== Example
+-- * 'requestSize' is the size of the incoming request
+-- * 'drainRate' is the constant drain rate (requests per second)
+-- * 'timeDelta' is the elapsed time since last update
+--
+-- = Example
 --
 -- @
 -- -- Initial state: half-full bucket at timestamp 1640995200.5
@@ -174,7 +175,7 @@ instance FromJSON TokenBucketState where
 -- @
 data LeakyBucketState = LeakyBucketState
   { level      :: Double  -- ^ Current fill level of the bucket (0.0 to capacity).
-                          --   Represents the amount of "water" (pending requests)
+                          --   Represents the amount of \"water\" (pending requests)
                           --   currently in the bucket. Higher values indicate
                           --   more backpressure or pending work.
   , lastTime   :: Double  -- ^ Timestamp of last bucket update as Unix time with
@@ -186,7 +187,7 @@ data LeakyBucketState = LeakyBucketState
 --
 -- Serializes the leaky bucket state to JSON format with full double precision.
 --
--- ==== JSON Format
+-- = JSON Format
 --
 -- @
 -- {
@@ -200,14 +201,14 @@ instance ToJSON LeakyBucketState
 --
 -- Deserializes JSON to 'LeakyBucketState' with the following validation rules:
 --
--- * @level@ must be non-negative (>= 0.0)
--- * @level@ must not exceed 1,000,000 (practical upper bound)
--- * @lastTime@ must be present and parseable as 'Double'
+-- * 'level' must be non-negative (>= 0.0)
+-- * 'level' must not exceed 1,000,000 (practical upper bound)
+-- * 'lastTime' must be present and parseable as 'Double'
 --
--- The upper bound on @level@ prevents potential overflow issues and ensures
+-- The upper bound on 'level' prevents potential overflow issues and ensures
 -- reasonable memory usage for bucket state tracking.
 --
--- ==== Validation Examples
+-- = Validation Examples
 --
 -- @
 -- -- Valid JSON
@@ -223,7 +224,7 @@ instance ToJSON LeakyBucketState
 -- -- Nothing
 -- @
 --
--- __Throws:__ Parse error if @level@ is negative, exceeds 1,000,000, or required fields are missing.
+-- Throws a parse error if 'level' is negative, exceeds 1,000,000, or required fields are missing.
 instance FromJSON LeakyBucketState where
   parseJSON = withObject "LeakyBucketState" $ \o -> do
     level <- o .: "level"

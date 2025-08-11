@@ -107,11 +107,11 @@ import Data.Proxy
 
 -- Type-safe cache creation
 tokenCache <- do
-  store <- createInMemoryStore @'TokenBucket
+  store <- createInMemoryStore \@'TokenBucket
   return $ newCache TokenBucket store
 
 fixedWindowCache <- do
-  store <- createInMemoryStore @'FixedWindow  
+  store <- createInMemoryStore \@'FixedWindow  
   return $ newCache FixedWindow store
 @
 
@@ -130,7 +130,7 @@ newCount <- incrementCache fixedWindowCache "api_key" 60
 
 @
 -- Composite key generation
-let userKey = makeCacheKey TokenBucket "zone1" "user456"
+let userKey = makeCacheKey "throttle1" TokenBucket "zone1" "user456"
 writeCache tokenCache userKey state 7200
 
 -- Cleanup and reset
@@ -310,18 +310,18 @@ algorithmPrefix TinyLRU       = "tiny_lru"
 --
 -- ==== Type Parameters
 --
--- * @store@: The storage backend type (e.g., 'InMemoryStore', Redis, etc.)
--- * The algorithm is captured in the store type for type safety
+-- The 'store' parameter represents the storage backend type (e.g., 'InMemoryStore', Redis, etc.)
+-- The algorithm is captured in the store type for type safety
 --
 -- ==== Example Usage
 --
 -- @
 -- -- Create a token bucket cache
--- tokenStore <- createInMemoryStore @'TokenBucket
+-- tokenStore <- createInMemoryStore \@'TokenBucket
 -- let tokenCache = Cache TokenBucket tokenStore
 --
 -- -- Create a fixed window cache
--- counterStore <- createInMemoryStore @'FixedWindow
+-- counterStore <- createInMemoryStore \@'FixedWindow
 -- let counterCache = Cache FixedWindow counterStore
 -- @
 data Cache store = Cache
@@ -526,11 +526,11 @@ data InMemoryStore (a :: Algorithm) where
 --
 -- @
 -- -- Compiler ensures correct store type
--- tokenStore <- createStore @'TokenBucket    -- Creates TokenBucketStore
--- counterStore <- createStore @'FixedWindow  -- Creates CounterStore
+-- tokenStore <- createStore \@'TokenBucket    -- Creates TokenBucketStore
+-- counterStore <- createStore \@'FixedWindow  -- Creates CounterStore
 -- 
 -- -- This would be a compile error:
--- -- tokenStore <- createStore @'SlidingWindow  -- Type mismatch!
+-- -- tokenStore <- createStore \@'SlidingWindow  -- Type mismatch!
 -- @
 --
 -- ==== Automatic Services
@@ -642,12 +642,12 @@ waitUntilNextPurge startTime remainingMicros purgeSignal = do
 --
 -- @
 -- -- These are all valid and type-safe:
--- tokenStore <- createInMemoryStore @'TokenBucket
--- counterStore <- createInMemoryStore @'FixedWindow
--- lruStore <- createInMemoryStore @'TinyLRU
+-- tokenStore <- createInMemoryStore \@'TokenBucket
+-- counterStore <- createInMemoryStore \@'FixedWindow
+-- lruStore <- createInMemoryStore \@'TinyLRU
 --
 -- -- This would be a compile error (typo):
--- -- badStore <- createInMemoryStore @'TokenBuckett  -- Not a valid algorithm
+-- -- badStore <- createInMemoryStore \@'TokenBuckett  -- Not a valid algorithm
 -- @
 --
 -- ==== Background Services
@@ -665,8 +665,8 @@ waitUntilNextPurge startTime remainingMicros purgeSignal = do
 --
 -- main = do
 --   -- Create stores for different algorithms
---   tokenStore <- createInMemoryStore @'TokenBucket
---   slidingStore <- createInMemoryStore @'SlidingWindow
+--   tokenStore <- createInMemoryStore \@'TokenBucket
+--   slidingStore <- createInMemoryStore \@'SlidingWindow
 --   
 --   -- Use in cache creation
 --   let tokenCache = newCache TokenBucket tokenStore
@@ -692,7 +692,7 @@ createInMemoryStore = createStore @a
 --
 -- @
 -- -- Create a token bucket cache with in-memory storage
--- store <- createInMemoryStore @'TokenBucket
+-- store <- createInMemoryStore \@'TokenBucket
 -- let cache = newCache TokenBucket store
 --
 -- -- Later operations use the unified cache interface
@@ -1114,8 +1114,8 @@ focusInsertOrUpdate getState entry newVal = Focus.Focus
 --
 -- @
 -- -- Start worker for streaming rate limiter
--- startLeakyBucketWorker stateVar queue 100 2.0 "stream123"
--- -- Capacity: 100 requests, Leak rate: 2 requests/second
+-- startLeakyBucketWorker stateVar queue 100 2.0
+-- -- Capacity: 100 requests, Leak rate: 2 requests\/second
 -- @
 startLeakyBucketWorker
   :: TVar LeakyBucketState          -- ^ Shared bucket state
@@ -1203,11 +1203,17 @@ resetStoreWith tvar = do
   newCache <- C.newCache Nothing
   atomically $ writeTVar tvar newCache
 
--- | Compose a unique cache key from algorithm, IP zone, and user identifier.
+-- | Compose a unique cache key from throttle name, algorithm, IP zone, and user identifier.
 --
 -- Creates hierarchical cache keys that prevent collisions and enable
 -- efficient organization of rate limiting data. The key format follows
 -- a consistent pattern across all algorithms.
+--
+-- ==== Key Format
+--
+-- @
+-- \<algorithm>:\<throttleName>:\<ipZone>:\<userKey>
+-- @
 --
 -- ==== Use Cases
 --
@@ -1222,13 +1228,23 @@ resetStoreWith tvar = do
 -- * __Query Efficiency__: Pattern-based queries and cleanup
 -- * __Debugging__: Clear key structure aids troubleshooting
 -- * __Monitoring__: Easy to aggregate metrics by zone or user type
-
--- | Compose a unique cache key including throttle name for isolation.
-makeCacheKey :: Text  -- ^ Throttle name (unique per rule)
-             -> Algorithm
-             -> Text       -- ^ IP zone
-             -> Text       -- ^ User key
-             -> Text
+--
+-- ==== Example
+--
+-- @
+-- -- Create key for API rate limiting
+-- let key = makeCacheKey "api_limit" TokenBucket "us-east-1" "user123"
+-- -- Result: "TokenBucket:api_limit:us-east-1:user123"
+--
+-- -- Create key for login attempts
+-- let key = makeCacheKey "login_attempts" FixedWindow "global" "192.168.1.1"
+-- -- Result: "FixedWindow:login_attempts:global:192.168.1.1"
+-- @
+makeCacheKey :: Text      -- ^ Throttle name (unique per rule)
+             -> Algorithm -- ^ Rate limiting algorithm
+             -> Text      -- ^ IP zone or region identifier
+             -> Text      -- ^ User key (user ID, IP address, API key, etc.)
+             -> Text      -- ^ Complete hierarchical cache key
 makeCacheKey throttleName algo ipZone userKey =
   algoToText algo <> ":" <> throttleName <> ":" <> ipZone <> ":" <> userKey
 
@@ -1266,9 +1282,8 @@ makeCacheKey throttleName algo ipZone userKey =
 --
 -- This function is pure, thread-safe, and forms a reversible pair with 'parseAlgoText'.
 -- Time complexity: O(1), Space complexity: O(1).
---
--- @since 0.1.1.0
-algoToText :: Algorithm -> Text
+algoToText :: Algorithm -- ^ The algorithm to convert
+           -> Text      -- ^ Canonical text representation
 algoToText FixedWindow   = "FixedWindow"
 algoToText SlidingWindow = "SlidingWindow"
 algoToText TokenBucket   = "TokenBucket"
@@ -1297,7 +1312,7 @@ algoToText TinyLRU       = "TinyLRU"
 -- @
 -- -- JSON parsing
 -- instance FromJSON RateLimitConfig where
---   parseJSON = withObject "RateLimitConfig" $ \o ->
+--   parseJSON = withObject "RateLimitConfig" $ \\o ->
 --     RateLimitConfig <$> (o .: "algorithm" >>= parseAlgoText)
 --                     <*> o .: "limit"
 --
@@ -1309,7 +1324,7 @@ algoToText TinyLRU       = "TinyLRU"
 --
 -- ==== Error Handling
 --
--- Calls @fail@ with descriptive error messages for invalid inputs. In aeson's
+-- Calls 'fail' with descriptive error messages for invalid inputs. In aeson's
 -- Parser context, this provides rich error reporting with parsing context.
 --
 -- ==== Round-trip Property
@@ -1319,9 +1334,8 @@ algoToText TinyLRU       = "TinyLRU"
 -- @
 --
 -- This function is pure, thread-safe, with O(1) time complexity after O(n) normalization.
---
--- @since 0.1.1.0
-parseAlgoText :: Text -> Parser Algorithm
+parseAlgoText :: Text            -- ^ Text representation to parse
+              -> Parser Algorithm -- ^ Parsed algorithm or error
 parseAlgoText t =
   case Tx.toLower t of
     "fixedwindow"    -> pure FixedWindow

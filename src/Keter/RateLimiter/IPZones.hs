@@ -17,7 +17,7 @@ algorithms (e.g., token bucket, leaky bucket, sliding window, etc.). This
 ensures multi-tenant systems can rate-limit different clients or groups in
 isolation.
 
-The primary structure here is `ZoneSpecificCaches`, which contains multiple
+The primary structure here is 'ZoneSpecificCaches', which contains multiple
 caches per zone. Utility functions allow dynamic creation, reset, and
 lookup of caches for specific zones.
 
@@ -61,7 +61,7 @@ import qualified StmContainers.Map as StmMap
 -- | Type alias representing an identifier for an IP zone.
 --
 -- This is used as a logical namespace or grouping key for assigning and isolating rate limiters.
--- Examples: `"default"`, `"zone-a"`, or `"192.168.1.0/24"`.
+-- Examples: @\"default\"@, @\"zone-a\"@, or @\"192.168.1.0\/24\"@.
 type IPZoneIdentifier = Text
 
 -- | The default IP zone identifier used when no specific zone is assigned.
@@ -89,13 +89,17 @@ data ZoneSpecificCaches = ZoneSpecificCaches
 
 -- | Create a new set of caches for a single IP zone.
 --
--- Each algorithm receives its own store. For `LeakyBucket`, a background
+-- Each algorithm receives its own store. For 'LeakyBucket', a background
 -- cleanup thread is also started to remove inactive entries periodically.
 --
--- == Example
+-- The cleanup thread runs every 60 seconds and removes entries older than 2 hours.
 --
--- > zoneCaches <- createZoneCaches
--- > cacheReset (zscTokenBucketCache zoneCaches)
+-- ==== __Examples__
+--
+-- @
+-- zoneCaches <- createZoneCaches
+-- cacheReset (zscTokenBucketCache zoneCaches)
+-- @
 createZoneCaches :: IO ZoneSpecificCaches
 createZoneCaches = do
   counterStore <- createInMemoryStore @'FixedWindow
@@ -127,9 +131,11 @@ newZoneSpecificCaches = createZoneCaches
 --
 -- Clears all internal state, including token counts, timestamps, and queues.
 --
--- == Example
+-- ==== __Examples__
 --
--- > resetSingleZoneCaches zoneCaches
+-- @
+-- resetSingleZoneCaches zoneCaches
+-- @
 resetSingleZoneCaches :: ZoneSpecificCaches -> IO ()
 resetSingleZoneCaches zsc = do
   cacheReset (zscCounterCache zsc)
@@ -142,9 +148,11 @@ resetSingleZoneCaches zsc = do
 --
 -- This is useful when only one type of rate limiter needs a reset.
 --
--- == Example
+-- ==== __Examples__
 --
--- > resetZoneCache zoneCaches TokenBucket
+-- @
+-- resetZoneCache zoneCaches TokenBucket
+-- @
 resetZoneCache :: ZoneSpecificCaches -> Algorithm -> IO ()
 resetZoneCache zsc algorithm = case algorithm of
   FixedWindow   -> cacheReset (zscCounterCache zsc)
@@ -155,14 +163,16 @@ resetZoneCache zsc algorithm = case algorithm of
 
 -- | Convert a socket address into an IP zone identifier.
 --
--- IPv4 addresses are rendered using `fromHostAddress`. IPv6 addresses are
+-- IPv4 addresses are rendered using 'fromHostAddress'. IPv6 addresses are
 -- expanded and zero-padded for consistency. Any unknown or unsupported
--- address formats fall back to the 'defaultIPZone'.
+-- address formats fall back to 'defaultIPZone'.
 --
--- == Example
+-- ==== __Examples__
 --
--- > zone <- sockAddrToIPZone (SockAddrInet 80 0x7f000001)
--- > print zone  -- "127.0.0.1"
+-- @
+-- zone <- sockAddrToIPZone (SockAddrInet 80 0x7f000001)
+-- print zone  -- \"127.0.0.1\"
+-- @
 sockAddrToIPZone :: SockAddr -> IO Text
 sockAddrToIPZone (SockAddrInet _ hostAddr) = do
   let ip = fromHostAddress hostAddr
@@ -173,4 +183,4 @@ sockAddrToIPZone (SockAddrInet6 _ _ (w1, w2, w3, w4) _) =
      w3 `shiftR` 16, w3 .&. 0xFFFF, w4 `shiftR` 16, w4 .&. 0xFFFF]
   where
     showHexWord n = let s = showHex n "" in if length s < 4 then replicate (4 - length s) '0' ++ s else s
-sockAddrToIPZone _ = return "default"
+sockAddrToIPZone _ = return defaultIPZone

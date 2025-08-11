@@ -11,23 +11,25 @@
 -- Portability : portable
 --
 -- This module provides a rate limiter based on the /Token Bucket/ algorithm.
--- It integrates with the `Keter.RateLimiter.Cache` infrastructure and uses STM
+-- It integrates with the "Keter.RateLimiter.Cache" infrastructure and uses STM
 -- and worker threads to manage refill and request allowance.
 --
--- The token bucket algorithm allows for a configurable burst size (`capacity`)
+-- The token bucket algorithm allows for a configurable burst size (capacity)
 -- and replenishes tokens over time at a fixed rate. If a request is made and
 -- a token is available, the request is allowed and a token is consumed.
 -- Otherwise, the request is denied.
 --
 -- == Example usage
 --
--- > import Keter.RateLimiter.TokenBucket (allowRequest)
--- > 
--- > allowed <- allowRequest cache "zone1" "user123" 10 2.5 60
--- > when allowed $ doSomething
+-- @
+-- import Keter.RateLimiter.TokenBucket (allowRequest)
+-- 
+-- allowed <- allowRequest cache \"zone1\" \"user123\" 10 2.5 60
+-- when allowed $ doSomething
+-- @
 --
--- This call checks if a request by "user123" in "zone1" is allowed, given a
--- bucket with a capacity of 10, a refill rate of 2.5 tokens/second, and a TTL of 60 seconds.
+-- This call checks if a request by @\"user123\"@ in @\"zone1\"@ is allowed, given a
+-- bucket with a capacity of 10, a refill rate of 2.5 tokens\/second, and a TTL of 60 seconds.
 
 module Keter.RateLimiter.TokenBucket
   ( -- * Request Evaluation
@@ -66,20 +68,60 @@ minTTL = 2
 --
 -- The token bucket is defined by:
 --
--- - @capacity@: maximum number of tokens in the bucket (i.e., max burst size).
--- - @refillRate@: tokens added per second (can be fractional).
--- - @expiresIn@: TTL in seconds; determines how long idle buckets live.
+-- * /capacity/: maximum number of tokens in the bucket (i.e., max burst size).
+-- * /refillRate/: tokens added per second (can be fractional).
+-- * /expiresIn/: TTL in seconds; determines how long idle buckets live.
 --
+-- The function performs the following steps:
+--
+-- 1. Validates that TTL meets the minimum threshold
+-- 2. Creates or retrieves the token bucket for the given key
+-- 3. For new buckets: starts a worker thread and allows the first request
+-- 4. For existing buckets: queues the request and waits for the worker's response
+--
+-- ==== __Examples__
+--
+-- @
+-- -- Allow 100 requests per minute with burst capacity of 10
+-- let capacity = 10
+--     refillRate = 100.0 \/ 60.0  -- ~1.67 tokens per second
+--     ttl = 300                  -- 5 minutes TTL
+--
+-- result <- allowRequest cache \"api-throttle\" \"192.168.1.1\" \"user456\" capacity refillRate ttl
+-- if result
+--   then putStrLn \"Request allowed\"
+--   else putStrLn \"Request denied - rate limit exceeded\"
+-- @
+--
+-- @
+-- -- High-frequency API with small bursts
+-- allowed <- allowRequest cache \"fast-api\" \"zone-premium\" \"client789\" 5 10.0 120
+-- @
+--
+-- /Thread Safety:/ This function is thread-safe and can be called concurrently
+-- from multiple threads for the same or different keys.
+--
+-- /Performance:/ For new buckets, there's a one-time setup cost of starting
+-- a worker thread. Subsequent requests are processed asynchronously with
+-- minimal blocking.
 allowRequest
   :: MonadIO m
   => Cache (InMemoryStore 'TokenBucket)
+  -- ^ Token bucket cache instance
   -> Text
+  -- ^ Throttle name (logical grouping identifier)
   -> Text
+  -- ^ IP zone identifier
   -> Text
+  -- ^ User key (unique client identifier)
   -> Int
+  -- ^ Bucket capacity (maximum tokens, must be positive)
   -> Double
+  -- ^ Refill rate in tokens per second (must be positive, can be fractional)
   -> Int
+  -- ^ TTL in seconds (must be >= 'minTTL')
   -> m Bool
+  -- ^ 'True' if request is allowed, 'False' if denied
 allowRequest cache throttleName ipZone userKey capacity refillRate expiresIn = liftIO $
   if expiresIn < minTTL
      then do

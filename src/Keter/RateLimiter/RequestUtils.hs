@@ -1,5 +1,3 @@
--- file: RequestUtils.hs
-
 {-# LANGUAGE OverloadedStrings #-}
 
 {-|
@@ -21,7 +19,7 @@ The helpers follow these rules:
 
 1.  /Zero/ allocation whenever the value is already available in the request
     record (e.g. @rawPathInfo@ or @requestMethod@ are reused verbatim).
-2.  No reverse DNS or other network round-trips – the functions are pure and
+2.  No reverse DNS or other network round-trips -- the functions are pure and
     fast.
 3.  Header names are handled case-insensitively via the
     'Data.CaseInsensitive.CI' type.
@@ -33,6 +31,7 @@ The helpers follow these rules:
 import Control.Monad.IO.Class (liftIO)
 import Network.Wai
 import Network.Wai.Handler.Warp (run)
+import Network.HTTP.Types (status200)
 import Keter.RateLimiter.RequestUtils (byIPAndPath)
 import Data.Text.IO as TIO
 
@@ -111,7 +110,7 @@ ipv4ToString addr =
   in T.intercalate "." (map (T.pack . show) [o1, o2, o3, o4])
 
 -- | Render an IPv6 'HostAddress6' as eight 16-bit hex blocks separated
--- by ‘:’.  Each block is zero-padded to four characters. This rendering
+-- by ':'.  Each block is zero-padded to four characters. This rendering
 -- is canonical but not compressed (e.g., it does not use @::@).
 --
 -- The function is micro-optimised to avoid lists and string formatting functions.
@@ -188,7 +187,8 @@ getRequestUserAgent = fmap (TE.decodeUtf8With TEE.lenientDecode) . lookup hUserA
 
 -- | Creates a request key based solely on the client's IP address.
 --
--- The result is always 'Just' a value, as an IP or equivalent is always available.
+-- This function always succeeds and returns a 'Just' value, as every WAI
+-- request has an associated socket address (IPv4, IPv6, or Unix socket).
 --
 -- ==== __Example__
 --
@@ -202,7 +202,8 @@ byIP req = Just <$> getClientIP req
 -- separated by a colon.
 --
 -- This is useful for rate-limiting access to specific endpoints rather than
--- penalizing a client for all of its requests.
+-- penalizing a client for all of its requests. This function always succeeds
+-- since both IP and path are always available.
 --
 -- ==== __Example__
 --
@@ -235,7 +236,8 @@ byIPAndUserAgent req = do
 
 -- | Builds a key from an arbitrary header and the client IP, joined by a colon.
 --
--- Header lookup is case-insensitive. Returns 'Nothing' if the header is absent.
+-- Header lookup is case-insensitive. Returns 'Nothing' if the specified header
+-- is absent from the request.
 --
 -- ==== __Example__
 --

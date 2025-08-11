@@ -11,7 +11,7 @@ Maintainer  : oleksandr.zhabenko@yahoo.com
 Stability   : stable
 Portability : portable
 
-This module provides utility functions for interacting with `Cache` instances
+This module provides utility functions for interacting with 'Cache' instances
 in a zone-aware manner. Each key is built from an algorithm-specific prefix,
 an IP zone label, and a user-specific identifier. This allows different
 logical groups (IP zones) to maintain independent rate limiting state even if
@@ -48,21 +48,18 @@ import Keter.RateLimiter.Cache
 -- zone and user key. The request is allowed if the resulting count
 -- does not exceed the limit for the given period.
 --
--- == Parameters
+-- The function takes a FixedWindow cache, throttle name, IP zone, user key,
+-- request limit, and time period. It returns 'True' if the request should
+-- be allowed, 'False' otherwise.
 --
--- [@cache@] The FixedWindow cache to use.
--- [@ipZone@] IP zone or logical tenant label.
--- [@userKey@] Unique per-client identifier (e.g., IP or token).
--- [@limit@] Maximum number of allowed requests in the given period.
--- [@period@] Time window in seconds.
+-- ==== __Examples__
 --
--- == Returns
---
--- A boolean indicating whether the request is allowed.
---
--- == Example
---
--- > allowed <- allowFixedWindowRequest myCache "zone1" "userA" 10 60
+-- @
+-- allowed <- allowFixedWindowRequest myCache \"throttle1\" \"zone1\" \"userA\" 10 60
+-- if allowed
+--   then putStrLn \"Request allowed\"
+--   else putStrLn \"Request denied - rate limit exceeded\"
+-- @
 allowFixedWindowRequest
   :: Cache (InMemoryStore 'FixedWindow)
   -- ^ FixedWindow-based cache handle
@@ -87,11 +84,18 @@ allowFixedWindowRequest cache throttleName ipZone userKey limit period = do
 -- | Increment a cache entry using a composed key derived from the zone and user key.
 --
 -- This is typically used in fixed-window rate limiters to track the number
--- of requests within a time period.
+-- of requests within a time period. The function creates a composite cache key
+-- from the throttle name, algorithm type, IP zone, and user key, then increments
+-- the stored counter value.
 --
--- == Requirements
+-- The stored type must be JSON-serializable and support numeric operations.
 --
--- The stored type @v@ must be JSON-serializable and support numeric operations.
+-- ==== __Examples__
+--
+-- @
+-- newCount <- incStoreWithZone cache \"api-throttle\" \"zone-a\" \"user123\" 3600
+-- print newCount  -- Prints the incremented counter value
+-- @
 incStoreWithZone
   :: (CacheStore store v IO, FromJSON v, ToJSON v, Num v, Ord v)
   => Cache store
@@ -113,7 +117,18 @@ incStoreWithZone cache throttleName ipZone userKey expiresIn = do
 
 -- | Read a cache entry using a composed key.
 --
--- Useful for debugging or non-mutating cache inspection.
+-- Useful for debugging or non-mutating cache inspection. The function
+-- constructs the appropriate cache key from the provided components and
+-- retrieves the stored value if it exists.
+--
+-- ==== __Examples__
+--
+-- @
+-- maybeValue <- readCacheWithZone cache \"throttle1\" \"zone1\" \"user456\"
+-- case maybeValue of
+--   Just val -> print val
+--   Nothing  -> putStrLn \"No entry found\"
+-- @
 readCacheWithZone
   :: (CacheStore store v IO)
   => Cache store
@@ -134,6 +149,15 @@ readCacheWithZone cache throttleName ipZone userKey = do
 -- | Write a value into the cache using a zone-aware key.
 --
 -- Typically used for manual updates, testing, or initializing state.
+-- The function creates a composite key and stores the provided value
+-- with the specified expiration time.
+--
+-- ==== __Examples__
+--
+-- @
+-- writeCacheWithZone cache \"throttle1\" \"zone1\" \"user789\" (42 :: Int) 1800
+-- putStrLn \"Value written to cache\"
+-- @
 writeCacheWithZone
   :: (CacheStore store v IO)
   => Cache store
@@ -156,7 +180,16 @@ writeCacheWithZone cache throttleName ipZone userKey val expiresIn = do
 
 -- | Delete an entry from the cache using a zone-aware key.
 --
--- Can be used to forcibly reset rate limiter state or clean up.
+-- Can be used to forcibly reset rate limiter state or clean up expired
+-- entries manually. The function constructs the appropriate cache key
+-- and removes the corresponding entry.
+--
+-- ==== __Examples__
+--
+-- @
+-- deleteCacheWithZone cache \"throttle1\" \"zone1\" \"user123\"
+-- putStrLn \"Cache entry deleted\"
+-- @
 deleteCacheWithZone
   :: (CacheStore store v IO)
   => Cache store

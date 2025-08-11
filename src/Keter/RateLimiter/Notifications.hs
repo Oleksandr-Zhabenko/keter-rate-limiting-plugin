@@ -52,7 +52,7 @@ import Keter.RateLimiter.Notifications
 import Network.Wai
 import Network.Socket
 import Network.Wai.Handler.Warp (run)
-import Network.HTTP.Types (status429)
+import Network.HTTP.Types (status200, status429)
 import Control.Monad.IO.Class (liftIO)
 
 -- A hypothetical function called when a client hits a rate limit.
@@ -87,6 +87,8 @@ You can create custom notifiers for integration with external systems:
 @
 import qualified Data.Text.IO as TIO
 import Control.Exception (try, SomeException)
+import Data.Time.Clock (getCurrentTime)
+import Data.Time.Format (defaultTimeLocale, formatTime)
 
 -- A notifier that attempts to write to a file, falling back to console on error
 fileNotifier :: FilePath -> Notifier
@@ -144,10 +146,17 @@ The 'consoleNotifier' produces log entries in the following format:
 YYYY-MM-DD HH:MM:SS - throttleName action item (limit: N)
 @
 
+When the throttle name is empty, it is omitted from the output:
+
+@
+YYYY-MM-DD HH:MM:SS - action item (limit: N)
+@
+
 Examples:
 @
 2025-01-30 13:45:12 - loginAttempts blocked "user123" (limit: 5)
 2025-01-30 13:45:13 - api-global blocked "192.168.1.100" (limit: 1000)
+2025-01-30 13:45:14 - blocked "item" (limit: 50)
 @
 
 Note that textual items are quoted due to the use of 'show' for conversion.
@@ -175,7 +184,7 @@ The 'convertWAIRequest' function creates a compact representation of WAI request
 * **IPv6 addresses**: @2001:0db8:0000:0000:0000:0000:0000:0001:443@
 * **Unix sockets**: Port information is omitted
 * **Empty query strings**: Only the path is included
-* **Empty throttle names**: The throttle name is simply omitted from the output
+* **Non-empty query strings**: Included with the leading '?' character
 
 == Thread-safety
 
@@ -195,6 +204,8 @@ IO exceptions that might occur during logging operations. In production environm
 you may want to wrap these notifiers with appropriate error handling:
 
 @
+import Control.Exception (try, SomeException)
+
 safeNotifier :: Notifier -> Notifier
 safeNotifier baseNotifier = baseNotifier
   { notifierAction = \\throttle act item limit -> do
@@ -232,13 +243,18 @@ The module is designed with testability in mind:
 Example test notifier:
 
 @
+import Data.IORef
+
 createTestNotifier :: IORef [Text] -> Notifier
 createTestNotifier outputRef = Notifier
   { notifierName = "test"
   , notifierAction = \\throttle act item limit -> do
       now <- getCurrentTime
-      let message = -- format message as needed
-      modifyIORef' outputRef (message :)
+      let timestamp = formatTime defaultTimeLocale "%Y-%m-%d %H:%M:%S" now
+          parts = [throttle, act, item, T.concat ["(limit: ", T.pack (show limit), ")"]]
+          message = T.intercalate " " $ filter (not . T.null) parts
+          fullMessage = T.pack timestamp <> " - " <> message
+      modifyIORef' outputRef (fullMessage :)
   }
 @
 

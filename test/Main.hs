@@ -463,7 +463,7 @@ testIPZoneIsolation = do
   b3 <- instrument envWithThrottle reqB1
   assertEqual "Zone B first request allowed" False b3
 
--- | Verifies that IPs not matching a specific zone fall back to the default zone and are tracked together.
+-- | Verifies that IPs not matching a specific zone fall back to the default zone and are tracked independently by their IP.
 testIPZoneDefaultFallback :: IO ()
 testIPZoneDefaultFallback = do
   env <- initConfig mainTestGetRequestIPZone
@@ -480,7 +480,7 @@ testIPZoneDefaultFallback = do
   b1 <- instrument envWithThrottle reqDefault
   assertEqual "Default zone first request allowed" False b1
   b2 <- instrument envWithThrottle reqGeneric
-  assertEqual "Generic IP default zone first request allowed" False b2
+  assertEqual "Generic IP in default zone should also be allowed (independent counter)" False b2
 
 -- | Verifies that 'cacheResetAll' clears the state for all defined IP zones.
 testIPZoneCacheResetAll :: IO ()

@@ -350,19 +350,25 @@ startAutoPurge cache intervalSeconds = do
 -- __Memory Impact:__ Prevents unbounded memory growth in applications with dynamic rate limiting keys.
 --
 -- __Performance:__ O(n) scan of all buckets, but typically runs infrequently during low-traffic periods.
+--
+-- * 'stmMap' - STM map containing token bucket entries keyed by identifier.
+--   Typically uses API keys, user IDs, or IP addresses as keys.
+--   Map is scanned atomically during each purge cycle.
+-- * 'intervalSeconds' - Purge interval in seconds. How often to scan for expired buckets.
+--   Balance between cleanup responsiveness and CPU usage.
+--   Recommended: 300-3600 seconds depending on traffic patterns.
+-- * 'ttlSeconds' - TTL (time-to-live) in seconds. Buckets unused for this duration
+--   are considered expired and eligible for removal.
+--   Should be much larger than typical request intervals.
+--   Recommended: 3600-86400 seconds.
+--
+-- Returns thread ID of the background purge thread.
+-- Can be used with 'killThread' to stop purging.
 startCustomPurgeTokenBucket
-  :: StmMap.Map Text TokenBucketEntry  -- ^ STM map containing token bucket entries keyed by identifier.
-                                       --   Typically uses API keys, user IDs, or IP addresses as keys.
-                                       --   Map is scanned atomically during each purge cycle.
-  -> Integer                           -- ^ Purge interval in seconds. How often to scan for expired buckets.
-                                       --   Balance between cleanup responsiveness and CPU usage.
-                                       --   Recommended: 300-3600 seconds depending on traffic patterns.
-  -> Integer                           -- ^ TTL (time-to-live) in seconds. Buckets unused for this duration
-                                       --   are considered expired and eligible for removal.
-                                       --   Should be much larger than typical request intervals.
-                                       --   Recommended: 3600-86400 seconds.
-  -> IO ThreadId                       -- ^ Returns thread ID of the background purge thread.
-                                       --   Can be used with 'killThread' to stop purging.
+  :: StmMap.Map Text TokenBucketEntry
+  -> Integer
+  -> Integer
+  -> IO ThreadId
 startCustomPurgeTokenBucket stmMap intervalSeconds ttlSeconds = startCustomPurge
   (\entry -> do
       TokenBucketState _ lastT <- readTVar (tbeState entry)
@@ -418,18 +424,24 @@ startCustomPurgeTokenBucket stmMap intervalSeconds ttlSeconds = startCustomPurge
 -- __Precision:__ Sub-second timestamp accuracy for fine-grained rate control.
 --
 -- __Cleanup Behavior:__ More aggressive cleanup suitable for high-frequency, short-lived connections.
+--
+-- * 'stmMap' - STM map containing leaky bucket entries keyed by identifier.
+--   Keys typically represent connections, streams, or data flows.
+--   All entries are scanned atomically during purge operations.
+-- * 'intervalSeconds' - Purge interval in seconds. Frequency of expired entry cleanup.
+--   For high-frequency applications, shorter intervals (60-600s)
+--   provide more responsive cleanup.
+-- * 'ttlSeconds' - TTL in seconds. Buckets inactive for this duration are purged.
+--   Should account for typical connection/stream lifetime patterns.
+--   Shorter TTL (900-3600s) suitable for transient connections.
+--
+-- Returns thread ID for background purge thread management.
+-- Thread runs continuously until explicitly terminated.
 startCustomPurgeLeakyBucket
-  :: StmMap.Map Text LeakyBucketEntry  -- ^ STM map containing leaky bucket entries keyed by identifier.
-                                       --   Keys typically represent connections, streams, or data flows.
-                                       --   All entries are scanned atomically during purge operations.
-  -> Integer                           -- ^ Purge interval in seconds. Frequency of expired entry cleanup.
-                                       --   For high-frequency applications, shorter intervals (60-600s)
-                                       --   provide more responsive cleanup.
-  -> Integer                           -- ^ TTL in seconds. Buckets inactive for this duration are purged.
-                                       --   Should account for typical connection/stream lifetime patterns.
-                                       --   Shorter TTL (900-3600s) suitable for transient connections.
-  -> IO ThreadId                       -- ^ Thread ID for background purge thread management.
-                                       --   Thread runs continuously until explicitly terminated.
+  :: StmMap.Map Text LeakyBucketEntry
+  -> Integer
+  -> Integer
+  -> IO ThreadId
 startCustomPurgeLeakyBucket stmMap intervalSeconds ttlSeconds = startCustomPurge
   (\entry -> do
       LeakyBucketState _ lastT <- readTVar (lbeState entry)
@@ -520,28 +532,36 @@ startCustomPurgeLeakyBucket stmMap intervalSeconds ttlSeconds = startCustomPurge
 -- __Extensibility:__ Custom delete actions enable complex cleanup scenarios.
 --
 -- __Reliability:__ Robust error handling ensures continuous operation.
+--
+-- * 'getTimestamp' - Timestamp extraction function. Called for each entry
+--   to determine last activity time. Should be fast and
+--   side-effect free. Returns Unix timestamp as 'Double'
+--   for sub-second precision.
+-- * 'deleteAction' - Custom delete action executed for expired entries.
+--   Receives both key and entry for context. Should
+--   handle resource cleanup and map removal atomically.
+--   Can perform logging, resource release, etc.
+-- * 'stmMap' - STM map to purge. Entries are identified by 'Text' keys
+--   and can be any type 'entry'. Map is scanned completely
+--   during each purge cycle for expired entries.
+-- * 'intervalSeconds' - Purge interval in seconds. Controls how frequently
+--   the purge operation runs. Shorter intervals provide
+--   more responsive cleanup but increase CPU usage.
+-- * 'ttlSeconds' - TTL (time-to-live) in seconds. Entries with timestamps
+--   older than (currentTime - ttlSeconds) are considered
+--   expired and eligible for removal.
+--
+-- Returns thread ID of the purge thread. Thread runs
+-- indefinitely until killed. Can be used for thread
+-- management and monitoring.
 startCustomPurge
   :: forall entry.
-     (entry -> STM Double)            -- ^ Timestamp extraction function. Called for each entry
-                                      --   to determine last activity time. Should be fast and
-                                      --   side-effect free. Returns Unix timestamp as 'Double'
-                                      --   for sub-second precision.
-  -> (Text -> entry -> STM ())        -- ^ Custom delete action executed for expired entries.
-                                      --   Receives both key and entry for context. Should
-                                      --   handle resource cleanup and map removal atomically.
-                                      --   Can perform logging, resource release, etc.
-  -> StmMap.Map Text entry            -- ^ STM map to purge. Entries are identified by 'Text' keys
-                                      --   and can be any type 'entry'. Map is scanned completely
-                                      --   during each purge cycle for expired entries.
-  -> Integer                          -- ^ Purge interval in seconds. Controls how frequently
-                                      --   the purge operation runs. Shorter intervals provide
-                                      --   more responsive cleanup but increase CPU usage.
-  -> Integer                          -- ^ TTL (time-to-live) in seconds. Entries with timestamps
-                                      --   older than (currentTime - ttlSeconds) are considered
-                                      --   expired and eligible for removal.
-  -> IO ThreadId                      -- ^ Returns thread ID of the purge thread. Thread runs
-                                      --   indefinitely until killed. Can be used for thread
-                                      --   management and monitoring.
+     (entry -> STM Double)
+  -> (Text -> entry -> STM ())
+  -> StmMap.Map Text entry
+  -> Integer
+  -> Integer
+  -> IO ThreadId
 startCustomPurge getTimestamp deleteAction stmMap intervalSeconds ttlSeconds = do
   purgeSignal <- newMVar ()
   forkIO $ forever $ do
