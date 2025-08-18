@@ -55,6 +55,7 @@ import Network.Wai.Test
 import Network.HTTP.Types
 import Network.Socket (SockAddr(..), tupleToHostAddress)
 import Data.Text (Text)
+import Control.Concurrent.STM (readTVarIO)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Data.ByteString as BS
@@ -646,11 +647,11 @@ testZoneCreation = do
   env' <- addThrottle env "test" throttle
   let zone1Req = mkRequestWithHeader "X-Zone" "zone1"
   let zone2Req = mkRequestWithHeader "X-Zone" "zone2"
-  zoneCaches <- readIORef (envZoneCachesMap env)
+  zoneCaches <- readTVarIO (envZoneCachesMap env)
   initialSize <- return $ HM.size zoneCaches
   _ <- instrument env' zone1Req
   _ <- instrument env' zone2Req
-  zoneCaches' <- readIORef (envZoneCachesMap env')
+  zoneCaches' <- readTVarIO (envZoneCachesMap env')
   finalSize <- return $ HM.size zoneCaches'
   assertBool "New zones created" (finalSize > initialSize)
 
@@ -771,7 +772,7 @@ testZoneCacheIsolation = do
         return [ra1, rb1]
   responses <- runSession session app
   assertEqual "Both zones populated" [status200, status200] (map simpleStatus responses)
-  zoneCaches <- readIORef (envZoneCachesMap env')
+  zoneCaches <- readTVarIO (envZoneCachesMap env')
   let zoneCount = HM.size zoneCaches
   assertBool "Multiple zones created" (zoneCount >= 2)
 
@@ -892,7 +893,7 @@ testManyZones = do
   let makeZoneRequest :: Integer -> Request
       makeZoneRequest i = mkRequestWithHeader "X-Zone-ID" (T.pack $ "zone" <> show i)
   mapM_ (\i -> instrument env' (makeZoneRequest i)) [1..50 :: Integer]
-  zoneCaches <- readIORef (envZoneCachesMap env')
+  zoneCaches <- readTVarIO (envZoneCachesMap env')
   let zoneCount = HM.size zoneCaches
   assertBool "Many zones created" (zoneCount > 10)
   assertBool "Reasonable zone count" (zoneCount <= 51)

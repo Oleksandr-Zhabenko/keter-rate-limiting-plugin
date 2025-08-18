@@ -5,10 +5,10 @@
 
 {-|
 Module      : Keter.RateLimiter.WAI
-Description : WAI-compatible rate limiting middleware with IP zone support
-Copyright   : (c) 2025 Oleksandr Zhabenko
+Description : WAI-compatible, plugin-friendly rate limiting middleware with IP-zone support
 License     : MIT
 Maintainer  : oleksandr.zhabenko@yahoo.com
+Copyright   : (c) 2025 Oleksandr Zhabenko 
 Stability   : stable
 Portability : portable
 
@@ -19,24 +19,64 @@ rack-attack, Copyright (c) 2016 by Kickstarter, PBC, under the MIT License.
 Oleksandr Zhabenko added several implementations of the window algorithm: tinyLRU, sliding window, token bucket window, leaky bucket window alongside with the initial count algorithm using AI chatbots.
 IP Zone functionality added to allow separate caches per IP zone.
 
-This implementation is released under the MIT License.
+Overview
+========
 
-This module provides WAI middleware that implements multiple IP-zone-specific
-rate limiting strategies including:
+This module provides WAI middleware for declarative, IP-zone-aware rate limiting with
+multiple algorithms:
 
-* Fixed Window
-* Sliding Window
-* Token Bucket
-* Leaky Bucket
-* TinyLRU
+- Fixed Window
+- Sliding Window
+- Token Bucket
+- Leaky Bucket
+- TinyLRU
 
-It supports multiple throttles applied simultaneously (e.g., per endpoint or
-user group), each with its own algorithm, rate, and identifier logic.
+Key points
+----------
 
-Rate limiting state is tracked separately per IP zone using the
-'ZoneSpecificCaches' abstraction with efficient HashMap-based lookups.
+- Plugin-friendly construction: build an environment once (Env) from 'RateLimiterConfig'
+  and produce a pure WAI 'Middleware'. This matches common WAI patterns and avoids
+  per-request setup or global mutable state.
 
-Use 'attackMiddleware' to enforce throttling in your WAI application.
+- Concurrency model: all shared structures inside 'Env' use STM 'TVar', not 'IORef'.
+  This ensures thread-safe updates under GHC's lightweight (green) threads.
+
+- Zone-specific caches: per-IP-zone caches are stored in a HashMap keyed by zone
+  identifiers. Zones are derived from a configurable strategy ('ZoneBy'), with a default.
+
+- No global caches in Keter: you can build one Env per compiled middleware chain
+  and cache that chain externally (e.g., per-vhost + middleware-list), preserving
+  counters/windows across requests.
+
+Quick start
+-----------
+
+1) Declarative configuration (e.g., parsed from JSON/YAML):
+
+@
+let cfg = RateLimiterConfig
+      { rlZoneBy = ZoneDefault
+      , rlThrottles =
+          [ RLThrottle "api"   1000 3600 FixedWindow IdIP Nothing
+          , RLThrottle "login" 5    300  TokenBucket IdIP (Just 600)
+          ]
+      }
+@
+
+2) Build Env once and obtain a pure Middleware:
+
+@
+env <- buildEnvFromConfig cfg
+let mw = buildRateLimiterWithEnv env
+app = mw baseApplication
+@
+
+Alternatively:
+
+@
+mw <- buildRateLimiter cfg  -- convenience: Env creation + Middleware
+app = mw baseApplication
+@
 
 -}
 
@@ -50,13 +90,18 @@ module Keter.RateLimiter.WAI
   , RateLimiterConfig(..)
   , initConfig
   , addThrottle
+
     -- * Middleware
-  , attackMiddleware
+  , attackMiddleware         -- low-level: apply throttling with an existing Env
+  , buildRateLimiter         -- convenience: build Env from config, return Middleware
+  , buildRateLimiterWithEnv  -- preferred: pure Middleware from a pre-built Env
+  , buildEnvFromConfig       -- build Env once from RateLimiterConfig
+
     -- * Manual Control & Inspection
   , instrument
   , cacheResetAll
-    -- * Functions for Middleware
-  , buildRateLimiter
+
+    -- * Helpers for configuration
   , registerThrottle
   , mkIdentifier
   , mkZoneFn
@@ -79,7 +124,6 @@ import Data.CaseInsensitive (mk, original)
 import GHC.Generics
 import qualified Data.ByteString as S
 import qualified Data.ByteString.Lazy as LBS
-import Data.IORef
 import Control.Concurrent.STM
 import Keter.RateLimiter.Cache
 import Keter.RateLimiter.IPZones (IPZoneIdentifier, defaultIPZone, ZoneSpecificCaches(..), createZoneCaches)
@@ -95,213 +139,149 @@ import Data.Time.Clock.POSIX (getPOSIXTime)
 import qualified Web.Cookie as WC
 
 --------------------------------------------------------------------------------
+-- Configuration and Environment
 
--- | Configuration for a single throttle rule.
+-- | Runtime throttle parameters assembled from declarative configuration.
 --
--- Defines the parameters for a specific rate limiting rule including
--- the algorithm to use, rate limits, and identifier extraction logic.
+-- See 'RLThrottle' for the declarative counterpart.
 data ThrottleConfig = ThrottleConfig
   { throttleLimit :: Int
-    -- ^ Maximum number of requests allowed per period.
+    -- ^ Maximum allowed requests per period.
   , throttlePeriod :: Int
-    -- ^ Period over which requests are counted (in seconds).
+    -- ^ Period length in seconds.
   , throttleAlgorithm :: Algorithm
-    -- ^ Algorithm used for throttling (e.g., 'FixedWindow', 'LeakyBucket').
+    -- ^ Throttling algorithm to use.
   , throttleIdentifier :: Request -> IO (Maybe Text)
-    -- ^ Function to extract an identifier (e.g., user or IP) from the request.
-    --   Returns 'Nothing' if throttling should be skipped.
+    -- ^ Extracts an identifier (e.g., user, IP). Nothing => skip this throttle.
   , throttleTokenBucketTTL :: Maybe Int
-    -- ^ Optional TTL (seconds) for TokenBucket entries. If not provided, defaults to 2.
+    -- ^ Optional TTL (seconds) for TokenBucket entries.
   }
 
--- | Global environment for throttling, including zone-specific cache HashMap and throttle configurations.
+-- | Thread-safe, shared state for rate limiting.
 --
--- The environment uses efficient HashMap-based lookups for both IP zone caches and
--- throttle configurations, providing O(1) average-case performance for cache and
--- throttle rule retrieval.
---
--- === HashMap Usage
---
--- * /envZoneCachesMap/: HashMap from IP zones to their corresponding rate limiter caches
--- * /envThrottles/: HashMap of throttle rules indexed by their unique names
---
--- === Concurrency Model
---
--- Both HashMaps are wrapped in 'IORef' for thread-safe atomic updates while
--- maintaining efficient read access patterns typical in web middleware.
+-- Concurrency model
+-- -----------------
+-- - Uses 'TVar' from STM for in-memory HashMaps.
+-- - Safe for green-threaded request handlers.
+-- - No global variables: construct 'Env' in your wiring/bootstrap and reuse it.
 data Env = Env
-  { envZoneCachesMap :: IORef (HM.HashMap IPZoneIdentifier ZoneSpecificCaches)
-    -- ^ HashMap from IP zones to rate limiter caches for O(1) zone cache lookup.
-  , envThrottles :: IORef (HM.HashMap Text ThrottleConfig)
-    -- ^ HashMap of registered throttle rules by name for O(1) throttle rule retrieval.
+  { envZoneCachesMap    :: TVar (HM.HashMap IPZoneIdentifier ZoneSpecificCaches)
+    -- ^ Per-zone caches for all algorithms.
+  , envThrottles        :: TVar (HM.HashMap Text ThrottleConfig)
+    -- ^ Named throttle configurations.
   , envGetRequestIPZone :: Request -> IPZoneIdentifier
-    -- ^ Function to derive an IP zone from the incoming WAI request.
+    -- ^ Function deriving the IP zone for a given request.
   }
 
---------------------------------------------------------------------------------
-
--- | Initialize the rate-limiter environment with a default zone and no throttles.
+-- | Initialize an empty environment with a zone-derivation function.
 --
--- Creates a fresh environment with:
---
--- * Empty HashMap for zone-specific caches (initialized with default zone only)
--- * Empty HashMap for throttle configurations
--- * Custom zone derivation function
---
--- === Performance Characteristics
---
--- * Initial HashMap creation: O(1)
--- * Default zone cache creation: O(1)
--- * Thread-safe IORef initialization: O(1)
+-- Populates the default zone lazily as needed; a default cache is allocated
+-- immediately for the default zone to keep fast-path lookups cheap.
 initConfig
-  :: (Request -> IPZoneIdentifier)
-  -- ^ Function to extract an IP zone label from the request.
+  :: (Request -> IPZoneIdentifier)  -- ^ Request -> zone label
   -> IO Env
 initConfig getIPZone = do
   defaultCaches <- createZoneCaches
-  zoneCachesMap <- newIORef $ HM.singleton defaultIPZone defaultCaches
-  throttles <- newIORef HM.empty
-  return $ Env zoneCachesMap throttles getIPZone
+  zoneCachesMap <- newTVarIO $ HM.singleton defaultIPZone defaultCaches
+  throttles     <- newTVarIO HM.empty
+  pure $ Env zoneCachesMap throttles getIPZone
 
--- | Register a new named throttle rule in the environment.
+-- | Add or replace a named throttle configuration.
 --
--- Adds a throttle configuration to the environment's HashMap-based registry.
--- If a throttle with the same name already exists, it will be replaced.
---
--- === HashMap Update
---
--- * Average case: O(1) insertion into throttles HashMap
--- * Atomic update via 'modifyIORef'' for thread safety
--- * Returns updated environment for method chaining
+-- STM-backed insertion for concurrency safety.
 addThrottle
   :: Env
-  -- ^ Environment to update
   -> Text
-  -- ^ Throttle rule name (must be unique)
   -> ThrottleConfig
-  -- ^ Throttle configuration
   -> IO Env
-  -- ^ Updated environment
 addThrottle env name config = do
-  modifyIORef' (envThrottles env) $ HM.insert name config
-  return env
+  atomically $ modifyTVar' (envThrottles env) $ HM.insert name config
+  pure env
 
--- | WAI middleware that applies registered throttles from the environment.
+--------------------------------------------------------------------------------
+-- Middleware (application of throttles)
+
+-- | Low-level middleware: apply throttling using an existing 'Env'.
 --
--- If any throttle blocks the request, a 429 response is returned.
--- Otherwise, the request is forwarded to the application.
---
--- ==== __Examples__
---
--- @
--- -- Basic setup with IP-based rate limiting
--- env <- initConfig (const defaultIPZone)
--- let throttleConfig = ThrottleConfig
---       { throttleLimit = 100
---       , throttlePeriod = 3600  -- 1 hour
---       , throttleAlgorithm = FixedWindow
---       , throttleIdentifier = RU.byIP
---       , throttleTokenBucketTTL = Nothing
---       }
--- env' <- addThrottle env \"api-limit\" throttleConfig
--- 
--- -- Use as WAI middleware
--- app = attackMiddleware env' baseApplication
--- @
+-- If any throttle denies the request, a 429 response is returned.
+-- Otherwise, 'app' is invoked.
 attackMiddleware
   :: Env
-  -- ^ Rate limiting environment
   -> Application
-  -- ^ Base WAI application
   -> Application
-  -- ^ Rate-limited WAI application
 attackMiddleware env app req respond = do
   blocked <- instrument env req
   if blocked
     then respond $ responseLBS status429 [] (LBS.fromStrict $ TE.encodeUtf8 "Too Many Requests")
     else app req respond
 
--- | Inspect all throttle rules and apply them to the incoming request.
+-- | Inspect all active throttles in 'Env' for the given request.
 --
--- Returns 'True' if any rule blocks the request.
---
--- === HashMap Processing
---
--- * O(1) throttles HashMap lookup via 'readIORef'
--- * O(n) processing of all throttle rules where n = number of throttles
--- * O(1) average case zone cache lookup in IP zone HashMap
+-- Returns True if the request should be blocked under any rule.
 instrument
   :: Env
-  -- ^ Rate limiting environment
   -> Request
-  -- ^ Incoming WAI request
   -> IO Bool
-  -- ^ 'True' if request should be blocked
 instrument env req = do
-  throttles <- readIORef (envThrottles env)
+  throttles <- readTVarIO (envThrottles env)
   let zone = envGetRequestIPZone env req
   zoneCaches <- getOrCreateZoneCaches env zone
-  -- Check all throttles and collect their block/allow decisions, passing throttle names
-  anyBlocked <- or <$> mapM (\(name, config) -> checkThrottle zoneCaches zone req name config) (HM.toList throttles)
-  return anyBlocked
+  or <$> mapM (\(name, cfg) -> checkThrottle zoneCaches zone req name cfg) (HM.toList throttles)
 
--- | Internal function to check a single throttle rule against a request.
---
--- This function is called from 'instrument' and has access to throttle names
--- for proper cache key construction.
+-- | Check an individual throttle against a request.
 checkThrottle :: ZoneSpecificCaches -> Text -> Request -> Text -> ThrottleConfig -> IO Bool
-checkThrottle caches zone req throttleName config = do
-  mIdentifier <- throttleIdentifier config req
+checkThrottle caches zone req throttleName cfg = do
+  mIdentifier <- throttleIdentifier cfg req
   case mIdentifier of
-    Nothing -> return False
-    Just identifier -> case throttleAlgorithm config of
+    Nothing        -> pure False
+    Just ident -> case throttleAlgorithm cfg of
       FixedWindow ->
-        -- allowFixedWindowRequest cache throttleName ipZone userKey limit period
+        -- allowFixedWindowRequest cache throttleName zone ident limit period
         not <$> allowFixedWindowRequest
-          (zscCounterCache caches)
-          throttleName
-          zone
-          identifier
-          (throttleLimit config)
-          (throttlePeriod config)
+                  (zscCounterCache caches)
+                  throttleName
+                  zone
+                  ident
+                  (throttleLimit cfg)
+                  (throttlePeriod cfg)
 
       SlidingWindow -> case zscTimestampCache caches of
         Cache { cacheStore = TimestampStore tvar } ->
-          -- SlidingWindow.allowRequest getTimeNow stmMapTVar throttleName ipZone userKey windowSize limit
+          -- SlidingWindow.allowRequest timeNow tvar throttleName zone ident window limit
           not <$> SlidingWindow.allowRequest
                   (realToFrac <$> getPOSIXTime)
                   tvar
                   throttleName
                   zone
-                  identifier
-                  (throttlePeriod config)
-                  (throttleLimit config)
+                  ident
+                  (throttlePeriod cfg)
+                  (throttleLimit cfg)
 
       TokenBucket -> do
-        let period = throttlePeriod config
-            limit = throttleLimit config
+        let period     = throttlePeriod cfg
+            limit      = throttleLimit cfg
             refillRate = if period > 0 then fromIntegral limit / fromIntegral period else 0.0
-            ttl = fromMaybe 2 (throttleTokenBucketTTL config)
-        -- TokenBucket.allowRequest cache throttleName ipZone userKey capacity refillRate expiresIn
+            ttl        = fromMaybe 2 (throttleTokenBucketTTL cfg)
+        -- TokenBucket.allowRequest cache throttleName zone ident capacity refill expires
         not <$> TokenBucket.allowRequest
                   (zscTokenBucketCache caches)
                   throttleName
                   zone
-                  identifier
+                  ident
                   (fromIntegral limit)
                   refillRate
                   (fromIntegral ttl)
 
       LeakyBucket -> do
-        let period = throttlePeriod config
-            limit = throttleLimit config
+        let period  = throttlePeriod cfg
+            limit   = throttleLimit cfg
             leakRate = if period > 0 then fromIntegral limit / fromIntegral period else 0.0
-        -- LeakyBucket.allowRequest cache throttleName ipZone userKey capacity leakRate
+        -- LeakyBucket.allowRequest cache throttleName zone ident capacity leakRate
         not <$> LeakyBucket.allowRequest
                   (zscLeakyBucketCache caches)
                   throttleName
                   zone
-                  identifier
+                  ident
                   (fromIntegral limit)
                   leakRate
 
@@ -310,117 +290,82 @@ checkThrottle caches zone req throttleName config = do
         case cacheStore (zscTinyLRUCache caches) of
           TinyLRUStore tvar -> do
             cache <- readTVarIO tvar
-            not <$> atomically (allowRequestTinyLRU now cache identifier (throttleLimit config) (throttlePeriod config))
+            -- allowRequestTinyLRU now cache ident capacity periodSecs
+            not <$> atomically (allowRequestTinyLRU now cache ident (throttleLimit cfg) (throttlePeriod cfg))
 
--- | Reset all caches for all IP zones tracked in the environment.
+-- | Reset all caches across all known zones.
 --
--- Iterates through the HashMap of zone caches and resets each zone's
--- rate limiting state across all algorithms.
---
--- === HashMap Processing
---
--- * O(1) HashMap read via 'readIORef'
--- * O(n) iteration over all zones where n = number of active zones
--- * Each zone reset involves clearing multiple algorithm-specific caches
+-- Useful in tests or administrative endpoints.
 cacheResetAll :: Env -> IO ()
 cacheResetAll env = do
-  zoneCachesMap <- readIORef (envZoneCachesMap env)
-  mapM_ (resetZoneCaches . snd) (HM.toList zoneCachesMap)
+  zoneCachesMap <- readTVarIO (envZoneCachesMap env)
+  mapM_ (resetZone . snd) (HM.toList zoneCachesMap)
   where
-    resetZoneCaches :: ZoneSpecificCaches -> IO ()
-    resetZoneCaches caches = do
+    resetZone :: ZoneSpecificCaches -> IO ()
+    resetZone caches = do
       cacheReset (zscCounterCache caches)
       cacheReset (zscTimestampCache caches)
       cacheReset (zscTokenBucketCache caches)
       cacheReset (zscLeakyBucketCache caches)
       cacheReset (zscTinyLRUCache caches)
 
--- | Retrieve or create the set of caches for a specific IP zone.
+-- | Retrieve or create caches for a given IP zone.
 --
--- Uses HashMap-based zone cache lookup with atomic fallback creation
--- for new zones. Ensures thread-safe zone cache initialization.
---
--- === HashMap Operations
---
--- * O(1) average case lookup in zone caches HashMap
--- * O(1) average case insertion for new zones via 'insertWith'
--- * Atomic 'modifyIORef'' prevents race conditions during zone creation
--- * Uses 'insertWith' with preference to existing caches (first writer wins)
+-- Ensures a single writer initializes a new zone; readers see either the
+-- existing or newly-inserted caches.
 getOrCreateZoneCaches
   :: Env
-  -- ^ Environment containing zone cache HashMap
   -> IPZoneIdentifier
-  -- ^ IP zone identifier
   -> IO ZoneSpecificCaches
-  -- ^ Zone-specific rate limiting caches
 getOrCreateZoneCaches env zone = do
-  readIORef (envZoneCachesMap env) >>= \m ->
-    case HM.lookup zone m of
-      Just caches -> return caches
-      Nothing -> do
-        newCaches <- createZoneCaches
-        atomicModifyIORef' (envZoneCachesMap env) $ \currentMap ->
-          let updatedMap = HM.insertWith (\_ old -> old) zone newCaches currentMap
-          in (updatedMap, updatedMap HM.! zone)
-
+  m <- readTVarIO (envZoneCachesMap env)
+  case HM.lookup zone m of
+    Just caches -> pure caches
+    Nothing -> do
+      newCaches <- createZoneCaches
+      atomically $ do
+        m0 <- readTVar (envZoneCachesMap env)
+        case HM.lookup zone m0 of
+          Just existing -> pure existing
+          Nothing -> do
+            let m1 = HM.insert zone newCaches m0
+            writeTVar (envZoneCachesMap env) m1
+            pure newCaches
 
 --------------------------------------------------------------------------------
--- * Configuration Data Types
+-- Declarative configuration types
 
--- | Specification for extracting client identifiers from requests.
---
--- Determines how clients are identified for rate limiting purposes.
--- Different strategies allow grouping by IP, headers, cookies, or
--- combinations thereof.
---
--- @since 0.1.1.0
+-- | How to identify clients for throttling.
 data IdentifierBy
-  = IdIP                          -- ^ Group by client IP address
-  | IdHeader !HeaderName          -- ^ Group by specific HTTP header value
-  | IdCookie !Text                -- ^ Group by cookie value from Cookie header
-  | IdIPAndPath                   -- ^ Group by IP address + request path
-  | IdIPAndUA                     -- ^ Group by IP address + User-Agent header
-  | IdHeaderAndIP !HeaderName     -- ^ Group by header value + IP address
+  = IdIP
+  | IdHeader !HeaderName
+  | IdCookie !Text
+  | IdIPAndPath
+  | IdIPAndUA
+  | IdHeaderAndIP !HeaderName
   deriving (Show, Eq, Generic)
 
--- | Specification for how to derive IP zones from requests.
---
--- IP zones allow rate limiting caches to be separated by logical or
--- geographic boundaries. Each zone maintains independent rate limiting
--- state using separate HashMap entries, enabling different policies for
--- different request sources.
---
--- @since 0.1.1.0
+-- | How to derive IP zones from requests.
 data ZoneBy
-  = ZoneDefault                   -- ^ All requests use default zone
-  | ZoneIP                        -- ^ Derive zone from client IP
-  | ZoneHeader !HeaderName        -- ^ Derive zone from header value
+  = ZoneDefault
+  | ZoneIP
+  | ZoneHeader !HeaderName
   deriving (Show, Eq, Generic)
 
--- | Complete specification for a single rate limiting rule.
---
--- Combines algorithm choice, rate parameters, and client identification
--- strategy into a single declarative configuration.
---
--- @since 0.1.1.0
+-- | Declarative throttle rule (parsed from JSON/YAML).
 data RLThrottle = RLThrottle
-  { rlName   :: !Text             -- ^ Unique throttle identifier
-  , rlLimit  :: !Int              -- ^ Maximum requests per period
-  , rlPeriod :: !Int              -- ^ Time period in seconds
-  , rlAlgo   :: !Algorithm        -- ^ Rate limiting algorithm
-  , rlIdBy   :: !IdentifierBy     -- ^ Request identifier strategy
-  , rlTokenBucketTTL :: !(Maybe Int) -- ^ TTL for TokenBucket (seconds)
+  { rlName   :: !Text
+  , rlLimit  :: !Int
+  , rlPeriod :: !Int
+  , rlAlgo   :: !Algorithm
+  , rlIdBy   :: !IdentifierBy
+  , rlTokenBucketTTL :: !(Maybe Int)
   } deriving (Show, Eq, Generic)
 
--- | Complete rate limiter configuration combining zone strategy and throttles.
---
--- Top-level configuration structure that defines both how to partition
--- requests into zones and what rate limiting rules to apply.
---
--- @since 0.1.1.0
+-- | Top-level configuration: zone strategy and throttle rules.
 data RateLimiterConfig = RateLimiterConfig
-  { rlZoneBy    :: !ZoneBy        -- ^ Zone derivation strategy
-  , rlThrottles :: ![RLThrottle]  -- ^ List of throttle rules
+  { rlZoneBy    :: !ZoneBy
+  , rlThrottles :: ![RLThrottle]
   } deriving (Show, Eq, Generic)
 
 instance FromJSON IdentifierBy where
@@ -432,7 +377,7 @@ instance FromJSON IdentifierBy where
          , IdCookie            <$> o .: "cookie"
          , IdHeaderAndIP . hdr <$> o .: "header+ip"
          ]
-  parseJSON _ = fail "identifier_by must be one of: 'ip' | 'ip+path' | 'ip+ua' | {header: ...} | {cookie: ...} | {header+ip: ...}"
+  parseJSON _ = fail "identifier_by: 'ip' | 'ip+path' | 'ip+ua' | {header} | {cookie} | {header+ip}"
 
 instance ToJSON IdentifierBy where
   toJSON IdIP              = String "ip"
@@ -446,7 +391,7 @@ instance FromJSON ZoneBy where
   parseJSON (String "default") = pure ZoneDefault
   parseJSON (String "ip")      = pure ZoneIP
   parseJSON (Object o)         = ZoneHeader . hdr <$> o .: "header"
-  parseJSON _ = fail "zone_by must be 'default' | 'ip' | {header: ...}"
+  parseJSON _ = fail "zone_by: 'default' | 'ip' | {header}"
 
 instance ToJSON ZoneBy where
   toJSON ZoneDefault     = String "default"
@@ -481,53 +426,35 @@ instance ToJSON RateLimiterConfig where
     object [ "zone_by" .= zb, "throttles" .= ths ]
 
 --------------------------------------------------------------------------------
--- * Functions for Middleware
+-- Public builders (preferred wiring API)
 
--- | Convert Text header name to WAI HeaderName.
+-- | Build 'Env' once from a declarative 'RateLimiterConfig'.
 --
--- @since 0.1.1.0
-hdr :: Text -> HeaderName
-hdr = mk . TE.encodeUtf8
-
--- | Extract the original ByteString from a case-insensitive HeaderName.
---
--- @since 0.1.1.0
-fromHeaderName :: HeaderName -> S.ByteString
-fromHeaderName = original
-
--- | Build a complete WAI middleware from a rate limiter configuration.
---
--- This is the primary entry point for declarative rate limiter setup.
--- It creates an environment, registers all throttles, and returns
--- ready-to-use WAI middleware.
---
--- ==== __Examples__
---
--- @
--- -- JSON-driven configuration
--- let config = RateLimiterConfig
---       { rlZoneBy = ZoneDefault
---       , rlThrottles = 
---           [ RLThrottle \"api\" 1000 3600 FixedWindow IdIP Nothing
---           , RLThrottle \"login\" 5 300 TokenBucket IdIP (Just 600)
---           ]
---       }
---
--- middleware <- buildRateLimiter config
--- app = middleware baseApplication
--- @
---
--- @since 0.1.1.0
-buildRateLimiter :: RateLimiterConfig -> IO Middleware
-buildRateLimiter (RateLimiterConfig zb ths) = do
+-- Use this at wiring time; the returned 'Env' is stable and reused across requests.
+buildEnvFromConfig :: RateLimiterConfig -> IO Env
+buildEnvFromConfig (RateLimiterConfig zb ths) = do
   let zoneFn = mkZoneFn zb
   env <- initConfig zoneFn
   mapM_ (registerThrottle env) ths
-  pure (attackMiddleware env)
+  pure env
 
--- | Register a single throttle rule in an existing environment.
+-- | Produce a pure 'Middleware' from an existing 'Env'.
 --
--- @since 0.1.1.0
+-- This is the recommended way to integrate with WAI/Keter: the middleware is
+-- a pure function, while the state is already encapsulated in 'Env'.
+buildRateLimiterWithEnv :: Env -> Middleware
+buildRateLimiterWithEnv = attackMiddleware
+
+-- | Convenience: build an 'Env' from config and return the 'Middleware'.
+--
+-- Suitable if you don’t need to retain the 'Env' for administrative operations.
+buildRateLimiter :: RateLimiterConfig -> IO Middleware
+buildRateLimiter cfg = buildRateLimiterWithEnv <$> buildEnvFromConfig cfg
+
+--------------------------------------------------------------------------------
+-- Helper functions for configuration
+
+-- | Register a single throttle rule into an 'Env'.
 registerThrottle :: Env -> RLThrottle -> IO ()
 registerThrottle env (RLThrottle name l p algo idBy ttl) = do
   let cfg = ThrottleConfig
@@ -540,9 +467,7 @@ registerThrottle env (RLThrottle name l p algo idBy ttl) = do
   _ <- addThrottle env name cfg
   pure ()
 
--- | Create an identifier extraction function from declarative specification.
---
--- @since 0.1.1.0
+-- | Build a request-identifier function from a declarative spec.
 mkIdentifier :: IdentifierBy -> Request -> IO (Maybe Text)
 mkIdentifier IdIP              = RU.byIP
 mkIdentifier IdIPAndPath       = RU.byIPAndPath
@@ -551,31 +476,22 @@ mkIdentifier (IdHeader h)      = \req -> pure $ fmap (TE.decodeUtf8With TEE.leni
 mkIdentifier (IdCookie name)   = \req -> pure $ cookieLookupText name req
 mkIdentifier (IdHeaderAndIP h) = RU.byHeaderAndIP h
 
--- | Internal helper: cookie lookup via Web.Cookie with empty-value rejection (matches previous semantics).
+-- | Cookie lookup via Web.Cookie; ignores empty values.
 cookieLookupText :: Text -> Request -> Maybe Text
 cookieLookupText n req = do
   raw <- lookup hCookie (requestHeaders req)
   let pairs = WC.parseCookies raw
   v <- lookup (TE.encodeUtf8 n) pairs
-  if S.null v
-     then Nothing
-     else Just (TE.decodeUtf8With TEE.lenientDecode v)
+  if S.null v then Nothing else Just (TE.decodeUtf8With TEE.lenientDecode v)
 
--- | Create a zone derivation function from declarative specification.
---
--- @since 0.1.1.0
+-- | Derive IP zone function from a declarative spec.
 mkZoneFn :: ZoneBy -> (Request -> IPZoneIdentifier)
 mkZoneFn ZoneDefault    = const defaultIPZone
 mkZoneFn ZoneIP         = getClientIPPure
 mkZoneFn (ZoneHeader h) = \req ->
   maybe defaultIPZone (TE.decodeUtf8With TEE.lenientDecode) (lookup h (requestHeaders req))
 
--- | Extract client IP address from WAI request with header precedence.
---
--- Checks headers in order of precedence: X-Forwarded-For, X-Real-IP,
--- then falls back to socket address. Handles IPv4, IPv6, and Unix sockets.
---
--- @since 0.1.1.0
+-- | Extract client IP with header precedence: X-Forwarded-For, X-Real-IP, then socket.
 getClientIPPure :: Request -> IPZoneIdentifier
 getClientIPPure req =
   let safeDecode = TE.decodeUtf8With TEE.lenientDecode
@@ -589,3 +505,11 @@ getClientIPPure req =
             SockAddrInet  _ addr     -> RU.ipv4ToString addr
             SockAddrInet6 _ _ addr _ -> RU.ipv6ToString addr
             SockAddrUnix   path      -> Tx.pack path
+
+-- | Construct a case-insensitive header name from Text.
+hdr :: Text -> HeaderName
+hdr = mk . TE.encodeUtf8
+
+-- | Extract original bytes from a case-insensitive header name.
+fromHeaderName :: HeaderName -> S.ByteString
+fromHeaderName = original

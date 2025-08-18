@@ -59,7 +59,8 @@ import Control.Concurrent.STM (atomically, readTVar)
 import Control.Concurrent (threadDelay)
 import Control.Monad (when)
 import Data.Maybe (isJust)
-import Data.IORef (readIORef)
+--import Data.IORef (readIORef)
+import Control.Concurrent.STM (readTVarIO)
 import Data.Cache (purgeExpired)
 import Test.Tasty (TestTree, defaultMain, testGroup, after, DependencyType(..))
 import Test.Tasty.HUnit (testCase, assertEqual, assertFailure)
@@ -412,7 +413,7 @@ testTimeBasedReset = do
   -- Wait for period + buffer
   threadDelay 1_500_000 -- 1.5 seconds to ensure expiration
   -- Debug cache state
-  cachesMap <- readIORef (envZoneCachesMap envWithThrottle)
+  cachesMap <- readTVarIO (envZoneCachesMap envWithThrottle)
   zoneCaches <- case HashMap.lookup testIPZoneA cachesMap of
     Just caches -> return caches
     Nothing -> assertFailure "Zone caches not found" >> return undefined
