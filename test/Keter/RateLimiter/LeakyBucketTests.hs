@@ -47,7 +47,6 @@ import Network.HTTP.Types (status200)
 import Network.HTTP.Types.Status (statusCode)
 import Network.Socket (SockAddr(..), tupleToHostAddress)
 import Keter.RateLimiter.Cache
-import Keter.RateLimiter.RequestUtils
 import Keter.RateLimiter.WAI
 import Keter.RateLimiter.IPZones
 import Keter.RateLimiter.LeakyBucket (allowRequest)
@@ -108,7 +107,7 @@ tests = testGroup "Leaky Bucket Tests"
             { throttleLimit = 2
             , throttlePeriod = 60
             , throttleAlgorithm = LeakyBucket
-            , throttleIdentifier = byIP
+            , throttleIdentifierBy = IdIP
             , throttleTokenBucketTTL = Nothing
             }
       env' <- addThrottle env (T.pack "test_throttle") throttle
@@ -126,7 +125,7 @@ tests = testGroup "Leaky Bucket Tests"
             { throttleLimit = 2
             , throttlePeriod = 60
             , throttleAlgorithm = LeakyBucket
-            , throttleIdentifier = byIP
+            , throttleIdentifierBy = IdIP
             , throttleTokenBucketTTL = Nothing
             }
       env' <- addThrottle env (T.pack "test_throttle") throttle
@@ -146,7 +145,7 @@ tests = testGroup "Leaky Bucket Tests"
             { throttleLimit = 2
             , throttlePeriod = 60
             , throttleAlgorithm = LeakyBucket
-            , throttleIdentifier = byIP
+            , throttleIdentifierBy = IdIP
             , throttleTokenBucketTTL = Nothing
             }
       env' <- addThrottle env (T.pack "test_throttle") throttle
@@ -164,7 +163,7 @@ tests = testGroup "Leaky Bucket Tests"
             { throttleLimit = 2
             , throttlePeriod = 60
             , throttleAlgorithm = LeakyBucket
-            , throttleIdentifier = byIP
+            , throttleIdentifierBy = IdIP
             , throttleTokenBucketTTL = Nothing
             }
       env' <- addThrottle env (T.pack "test_throttle") throttle
@@ -184,7 +183,7 @@ tests = testGroup "Leaky Bucket Tests"
             { throttleLimit = 2  -- capacity
             , throttlePeriod = 2 -- time to leak one request (leak rate is capacity / period)
             , throttleAlgorithm = LeakyBucket
-            , throttleIdentifier = byIP
+            , throttleIdentifierBy = IdIP
             , throttleTokenBucketTTL = Nothing
             }
       env' <- addThrottle env (T.pack "test_throttle") throttle
@@ -209,7 +208,7 @@ tests = testGroup "Leaky Bucket Tests"
             { throttleLimit = 2
             , throttlePeriod = 60
             , throttleAlgorithm = LeakyBucket
-            , throttleIdentifier = byIP
+            , throttleIdentifierBy = IdIP
             , throttleTokenBucketTTL = Nothing
             }
       env' <- addThrottle env (T.pack "test_throttle") throttle
@@ -230,7 +229,7 @@ tests = testGroup "Leaky Bucket Tests"
             { throttleLimit = 2
             , throttlePeriod = 60
             , throttleAlgorithm = LeakyBucket
-            , throttleIdentifier = byIP
+            , throttleIdentifierBy = IdIP
             , throttleTokenBucketTTL = Nothing
             }
       env' <- addThrottle env (T.pack "test_throttle") throttle
@@ -249,7 +248,7 @@ tests = testGroup "Leaky Bucket Tests"
             { throttleLimit = 2
             , throttlePeriod = 60
             , throttleAlgorithm = LeakyBucket
-            , throttleIdentifier = byIP
+            , throttleIdentifierBy = IdIP
             , throttleTokenBucketTTL = Nothing
             }
       env' <- addThrottle env (T.pack "test_throttle") throttle

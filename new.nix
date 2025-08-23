@@ -2,7 +2,7 @@
 
 pkgs.haskellPackages.mkDerivation {
   pname = "keter-rate-limiting-plugin";
-  version = "0.1.2.0";
+  version = "0.2.0.0";
   src = ./.;
   libraryHaskellDepends = with pkgs.haskellPackages; [
     aeson 

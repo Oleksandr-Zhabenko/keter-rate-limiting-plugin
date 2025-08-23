@@ -90,8 +90,7 @@ import Control.Monad (guard)
 
 -- Main library imports
 import Keter.RateLimiter.WAI
-  ( attackMiddleware, Env, initConfig, addThrottle, ThrottleConfig(..) )
--- CORRECTED: Import Algorithm from its actual source module, Keter.RateLimiter.Cache
+  ( attackMiddleware, Env, initConfig, addThrottle, ThrottleConfig(..), IdentifierBy(..))
 import Keter.RateLimiter.Cache (Algorithm(..))
 import Keter.RateLimiter.IPZones (IPZoneIdentifier, defaultIPZone)
 
@@ -128,7 +127,7 @@ main = do
         { throttleLimit        = 4
         , throttlePeriod       = 10
         , throttleAlgorithm    = FixedWindow
-        , throttleIdentifier   = getClientIdentifier
+        , throttleIdentifierBy = IdIP
         , throttleTokenBucketTTL = Nothing -- Not used for FixedWindow, can be Nothing.
         }
   

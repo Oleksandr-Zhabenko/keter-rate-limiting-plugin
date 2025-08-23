@@ -20,3 +20,7 @@
 
 * First version revised D. Changed Keter.RateLimiter.WAI module to more declaraive approach recommended by @jappeace for keter integration. Reflected the changes in the README.md file.
 
+## 0.2.0.0 -- 2025-08-24
+
+* Second version. Changed Keter.RateLimiter.WAI module to remove multiple times computed data while working on the advice of @jappeace for keter integration and to prevent potential memory leak when keter reloads configuration. 
+

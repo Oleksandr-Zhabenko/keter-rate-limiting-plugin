@@ -316,7 +316,7 @@ tests = testGroup "TinyLRU Tests"
   , testCase "Concurrent Reset and Access" $ do
       cache <- createTinyLRU 3
       now <- getTime Monotonic
-      results <- replicateConcurrently 50 $ do
+      _ <- replicateConcurrently 50 $ do
         -- Fixed: Add explicit type annotation for randomRIO
         action <- randomRIO (0, 1 :: Int)
         if action == 0

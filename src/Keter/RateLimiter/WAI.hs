@@ -2,13 +2,14 @@
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE TupleSections #-}
+{-# LANGUAGE DeriveGeneric #-}
 
 {-|
 Module      : Keter.RateLimiter.WAI
 Description : WAI-compatible, plugin-friendly rate limiting middleware with IP-zone support
 License     : MIT
 Maintainer  : oleksandr.zhabenko@yahoo.com
-Copyright   : (c) 2025 Oleksandr Zhabenko 
+Copyright   : (c) 2025 Oleksandr Zhabenko
 Stability   : stable
 Portability : portable
 
@@ -110,52 +111,67 @@ module Keter.RateLimiter.WAI
   , fromHeaderName
   ) where
 
+import Control.Concurrent.STM
 import Data.Aeson hiding (pairs)
+import qualified Data.ByteString as S
+import qualified Data.ByteString.Lazy as LBS
+import Data.CaseInsensitive (mk, original)
+import Data.Foldable (asum)
+import Data.Hashable (Hashable(..))
+import qualified Data.HashMap.Strict as HM
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Tx
 import qualified Data.Text.Encoding as TE
 import qualified Data.Text.Encoding.Error as TEE
-import qualified Data.HashMap.Strict as HM
-import Data.Foldable (asum)
-import Network.Wai
-import Network.HTTP.Types (status429, HeaderName, hCookie)
-import Network.Socket (SockAddr(..))
-import Data.CaseInsensitive (mk, original)
 import GHC.Generics
-import qualified Data.ByteString as S
-import qualified Data.ByteString.Lazy as LBS
-import Control.Concurrent.STM
-import Keter.RateLimiter.Cache
-import Keter.RateLimiter.IPZones (IPZoneIdentifier, defaultIPZone, ZoneSpecificCaches(..), createZoneCaches)
+import Network.HTTP.Types (HeaderName, hCookie, status429)
+import Network.Socket (SockAddr (..))
+import Network.Wai
+import qualified Web.Cookie as WC
+
+-- SOLUTION: Import Cache with hiding Algorithm to avoid conflict, then import Algorithm explicitly
+import Keter.RateLimiter.Cache hiding (Algorithm)
+import Keter.RateLimiter.Cache (Algorithm(..))
+import Keter.RateLimiter.CacheWithZone (allowFixedWindowRequest)
+import Keter.RateLimiter.IPZones
+  ( IPZoneIdentifier
+  , ZoneSpecificCaches(..)
+  , createZoneCaches
+  , defaultIPZone
+  )
+import qualified Keter.RateLimiter.LeakyBucket as LeakyBucket
+import qualified Keter.RateLimiter.RequestUtils as RU
 import qualified Keter.RateLimiter.SlidingWindow as SlidingWindow
 import qualified Keter.RateLimiter.TokenBucket as TokenBucket
-import qualified Keter.RateLimiter.LeakyBucket as LeakyBucket
-import Keter.RateLimiter.CacheWithZone (allowFixedWindowRequest)
-import qualified Keter.RateLimiter.RequestUtils as RU
 import Data.TinyLRU (allowRequestTinyLRU)
-import System.Clock (Clock(Monotonic), getTime)
-import Data.Maybe (fromMaybe)
+import System.Clock (Clock (Monotonic), getTime)
 import Data.Time.Clock.POSIX (getPOSIXTime)
-import qualified Web.Cookie as WC
 
 --------------------------------------------------------------------------------
 -- Configuration and Environment
+
+-- SOLUTION: Use the Algorithm from Cache module, don't redefine it
+-- type Algorithm = Cache.Algorithm  -- Remove this line since we import directly
 
 -- | Runtime throttle parameters assembled from declarative configuration.
 --
 -- See 'RLThrottle' for the declarative counterpart.
 data ThrottleConfig = ThrottleConfig
-  { throttleLimit :: Int
+  { throttleLimit :: !Int
     -- ^ Maximum allowed requests per period.
-  , throttlePeriod :: Int
+  , throttlePeriod :: !Int
     -- ^ Period length in seconds.
-  , throttleAlgorithm :: Algorithm
-    -- ^ Throttling algorithm to use.
-  , throttleIdentifier :: Request -> IO (Maybe Text)
-    -- ^ Extracts an identifier (e.g., user, IP). Nothing => skip this throttle.
-  , throttleTokenBucketTTL :: Maybe Int
+  , throttleAlgorithm :: !Algorithm
+    -- ^ Which throttling algorithm to use.
+  , throttleIdentifierBy :: !IdentifierBy
+    -- ^ Declarative spec for extracting an identifier (e.g., IP, header, cookie).
+    -- At runtime we derive the extractor using 'mkIdentifier' and compute it
+    -- at most once per request per IdentifierBy group. If extraction yields
+    -- Nothing, this throttle does not apply to the request.
+  , throttleTokenBucketTTL :: !(Maybe Int)
     -- ^ Optional TTL (seconds) for TokenBucket entries.
-  }
+  } deriving (Show, Eq, Generic)
 
 -- | Thread-safe, shared state for rate limiting.
 --
@@ -212,86 +228,122 @@ attackMiddleware
 attackMiddleware env app req respond = do
   blocked <- instrument env req
   if blocked
-    then respond $ responseLBS status429 [] (LBS.fromStrict $ TE.encodeUtf8 "Too Many Requests")
+    then respond $ responseLBS status429 [("Content-Type","text/plain; charset=utf-8")]
+                      (LBS.fromStrict $ TE.encodeUtf8 "Too Many Requests")
     else app req respond
 
 -- | Inspect all active throttles in 'Env' for the given request.
 --
 -- Returns True if the request should be blocked under any rule.
-instrument
-  :: Env
-  -> Request
-  -> IO Bool
+instrument :: Env -> Request -> IO Bool
 instrument env req = do
   throttles <- readTVarIO (envThrottles env)
-  let zone = envGetRequestIPZone env req
-  zoneCaches <- getOrCreateZoneCaches env zone
-  or <$> mapM (\(name, cfg) -> checkThrottle zoneCaches zone req name cfg) (HM.toList throttles)
+  if HM.null throttles
+    then pure False
+    else do
+      let zone = envGetRequestIPZone env req
+      caches <- getOrCreateZoneCaches env zone
+      let buckets = groupByIdentifier throttles
+      anyMHashMap
+        (\idBy group ->
+           case group of
+             [] -> pure False
+             ((_name0, _cfg0):_) -> do
+               -- Compute identifier once per IdentifierBy group
+               mIdent <- mkIdentifier idBy req
+               case mIdent of
+                 Nothing    -> pure False
+                 Just ident ->
+                   anyMList
+                     (\(name, cfg) ->
+                        checkThrottleWithIdent caches zone req name cfg (Just ident)
+                     )
+                     group
+        )
+        buckets
 
--- | Check an individual throttle against a request.
-checkThrottle :: ZoneSpecificCaches -> Text -> Request -> Text -> ThrottleConfig -> IO Bool
-checkThrottle caches zone req throttleName cfg = do
-  mIdentifier <- throttleIdentifier cfg req
+-- | Check an individual throttle with a precomputed identifier.
+--
+-- True = block, False = allow.
+checkThrottleWithIdent
+  :: ZoneSpecificCaches
+  -> Text                 -- ^ zone
+  -> Request
+  -> Text                 -- ^ throttle name
+  -> ThrottleConfig
+  -> Maybe Text           -- ^ precomputed identifier
+  -> IO Bool
+checkThrottleWithIdent caches zone _req throttleName cfg mIdentifier =
   case mIdentifier of
-    Nothing        -> pure False
-    Just ident -> case throttleAlgorithm cfg of
-      FixedWindow ->
-        -- allowFixedWindowRequest cache throttleName zone ident limit period
-        not <$> allowFixedWindowRequest
-                  (zscCounterCache caches)
-                  throttleName
-                  zone
-                  ident
-                  (throttleLimit cfg)
-                  (throttlePeriod cfg)
+    Nothing    -> pure False
+    Just ident ->
+      case throttleAlgorithm cfg of
+        -- SOLUTION: Use unqualified Algorithm constructors since we imported them explicitly
+        FixedWindow ->
+          -- allowFixedWindowRequest cache throttleName zone ident limit period
+          not <$> allowFixedWindowRequest
+                    (zscCounterCache caches)
+                    throttleName
+                    zone
+                    ident
+                    (throttleLimit cfg)
+                    (throttlePeriod cfg)
 
-      SlidingWindow -> case zscTimestampCache caches of
-        Cache { cacheStore = TimestampStore tvar } ->
-          -- SlidingWindow.allowRequest timeNow tvar throttleName zone ident window limit
-          not <$> SlidingWindow.allowRequest
-                  (realToFrac <$> getPOSIXTime)
-                  tvar
-                  throttleName
-                  zone
-                  ident
-                  (throttlePeriod cfg)
-                  (throttleLimit cfg)
+        SlidingWindow -> case zscTimestampCache caches of
+          Cache { cacheStore = TimestampStore tvar } ->
+            -- SlidingWindow.allowRequest timeNow tvar throttleName zone ident window limit
+            not <$> SlidingWindow.allowRequest
+                      (realToFrac <$> getPOSIXTime)
+                      tvar
+                      throttleName
+                      zone
+                      ident
+                      (throttlePeriod cfg)
+                      (throttleLimit cfg)
 
-      TokenBucket -> do
-        let period     = throttlePeriod cfg
-            limit      = throttleLimit cfg
-            refillRate = if period > 0 then fromIntegral limit / fromIntegral period else 0.0
-            ttl        = fromMaybe 2 (throttleTokenBucketTTL cfg)
-        -- TokenBucket.allowRequest cache throttleName zone ident capacity refill expires
-        not <$> TokenBucket.allowRequest
-                  (zscTokenBucketCache caches)
-                  throttleName
-                  zone
-                  ident
-                  (fromIntegral limit)
-                  refillRate
-                  (fromIntegral ttl)
+        TokenBucket -> do
+          let period     = throttlePeriod cfg
+              limit      = throttleLimit cfg
+              refillRate = if period > 0 then fromIntegral limit / fromIntegral period else 0.0
+              ttl        = fromMaybe 2 (throttleTokenBucketTTL cfg)
+          -- TokenBucket.allowRequest cache throttleName zone ident capacity refill expires
+          not <$> TokenBucket.allowRequest
+                    (zscTokenBucketCache caches)
+                    throttleName
+                    zone
+                    ident
+                    (fromIntegral limit)
+                    refillRate
+                    (fromIntegral ttl)
 
-      LeakyBucket -> do
-        let period  = throttlePeriod cfg
-            limit   = throttleLimit cfg
-            leakRate = if period > 0 then fromIntegral limit / fromIntegral period else 0.0
-        -- LeakyBucket.allowRequest cache throttleName zone ident capacity leakRate
-        not <$> LeakyBucket.allowRequest
-                  (zscLeakyBucketCache caches)
-                  throttleName
-                  zone
-                  ident
-                  (fromIntegral limit)
-                  leakRate
+        LeakyBucket -> do
+          let period   = throttlePeriod cfg
+              limit    = throttleLimit cfg
+              leakRate = if period > 0 then fromIntegral limit / fromIntegral period else 0.0
+          -- LeakyBucket.allowRequest cache throttleName zone ident capacity leakRate
+          not <$> LeakyBucket.allowRequest
+                    (zscLeakyBucketCache caches)
+                    throttleName
+                    zone
+                    ident
+                    (fromIntegral limit)
+                    leakRate
 
-      TinyLRU -> do
-        now <- getTime Monotonic
-        case cacheStore (zscTinyLRUCache caches) of
-          TinyLRUStore tvar -> do
-            cache <- readTVarIO tvar
-            -- allowRequestTinyLRU now cache ident capacity periodSecs
-            not <$> atomically (allowRequestTinyLRU now cache ident (throttleLimit cfg) (throttlePeriod cfg))
+        TinyLRU -> do
+          now <- getTime Monotonic
+          case cacheStore (zscTinyLRUCache caches) of
+            TinyLRUStore tvar -> do
+              cache <- readTVarIO tvar
+              -- allowRequestTinyLRU now cache ident capacity periodSecs
+              not <$> atomically (allowRequestTinyLRU now cache ident (throttleLimit cfg) (throttlePeriod cfg))
+
+-- | Backward-compatible entry that derives the identifier and delegates
+-- to the precomputed path, ensuring no duplicate computation.
+checkThrottle
+  :: ZoneSpecificCaches -> Text -> Request -> Text -> ThrottleConfig -> IO Bool
+checkThrottle caches zone req throttleName cfg = do
+  mIdentifier <- mkIdentifier (throttleIdentifierBy cfg) req
+  checkThrottleWithIdent caches zone req throttleName cfg mIdentifier
 
 -- | Reset all caches across all known zones.
 --
@@ -344,6 +396,15 @@ data IdentifierBy
   | IdIPAndUA
   | IdHeaderAndIP !HeaderName
   deriving (Show, Eq, Generic)
+
+-- Manual Hashable instance since HeaderName doesn't have one
+instance Hashable IdentifierBy where
+  hashWithSalt s IdIP = hashWithSalt s (0 :: Int)
+  hashWithSalt s (IdHeader h) = hashWithSalt s (1 :: Int, original h)
+  hashWithSalt s (IdCookie t) = hashWithSalt s (2 :: Int, t)
+  hashWithSalt s IdIPAndPath = hashWithSalt s (3 :: Int)
+  hashWithSalt s IdIPAndUA = hashWithSalt s (4 :: Int)
+  hashWithSalt s (IdHeaderAndIP h) = hashWithSalt s (5 :: Int, original h)
 
 -- | How to derive IP zones from requests.
 data ZoneBy
@@ -447,7 +508,7 @@ buildRateLimiterWithEnv = attackMiddleware
 
 -- | Convenience: build an 'Env' from config and return the 'Middleware'.
 --
--- Suitable if you don’t need to retain the 'Env' for administrative operations.
+-- Suitable if you don't need to retain the 'Env' for administrative operations.
 buildRateLimiter :: RateLimiterConfig -> IO Middleware
 buildRateLimiter cfg = buildRateLimiterWithEnv <$> buildEnvFromConfig cfg
 
@@ -455,17 +516,15 @@ buildRateLimiter cfg = buildRateLimiterWithEnv <$> buildEnvFromConfig cfg
 -- Helper functions for configuration
 
 -- | Register a single throttle rule into an 'Env'.
-registerThrottle :: Env -> RLThrottle -> IO ()
-registerThrottle env (RLThrottle name l p algo idBy ttl) = do
-  let cfg = ThrottleConfig
-              { throttleLimit = l
-              , throttlePeriod = p
-              , throttleAlgorithm = algo
-              , throttleIdentifier = mkIdentifier idBy
-              , throttleTokenBucketTTL = ttl
-              }
-  _ <- addThrottle env name cfg
-  pure ()
+registerThrottle :: Env -> RLThrottle -> IO Env
+registerThrottle env (RLThrottle name l p algo idBy ttl) =
+  addThrottle env name ThrottleConfig
+    { throttleLimit = l
+    , throttlePeriod = p
+    , throttleAlgorithm = algo
+    , throttleIdentifierBy = idBy
+    , throttleTokenBucketTTL = ttl
+    }
 
 -- | Build a request-identifier function from a declarative spec.
 mkIdentifier :: IdentifierBy -> Request -> IO (Maybe Text)
@@ -513,3 +572,26 @@ hdr = mk . TE.encodeUtf8
 -- | Extract original bytes from a case-insensitive header name.
 fromHeaderName :: HeaderName -> S.ByteString
 fromHeaderName = original
+
+--------------------------------------------------------------------------------
+-- Internal helpers: grouping and traversal (to avoid duplicate work)
+
+type ThrottleName = Text
+type Grouped = HM.HashMap IdentifierBy [(ThrottleName, ThrottleConfig)]
+
+-- | Group throttles by their IdentifierBy to compute the identifier once per group.
+groupByIdentifier :: HM.HashMap ThrottleName ThrottleConfig -> Grouped
+groupByIdentifier =
+  HM.foldlWithKey' step HM.empty
+  where
+    step acc name cfg =
+      HM.insertWith (++) (throttleIdentifierBy cfg) [(name, cfg)] acc
+
+anyMList :: (a -> IO Bool) -> [a] -> IO Bool
+anyMList _ []     = pure False
+anyMList f (x:xs) = do
+  b <- f x
+  if b then pure True else anyMList f xs
+
+anyMHashMap :: (k -> v -> IO Bool) -> HM.HashMap k v -> IO Bool
+anyMHashMap f = anyMList (uncurry f) . HM.toList

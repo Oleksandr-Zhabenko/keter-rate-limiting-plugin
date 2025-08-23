@@ -46,7 +46,6 @@ import Network.Socket (SockAddr(..), tupleToHostAddress)
 import Keter.RateLimiter.Cache
 import Keter.RateLimiter.WAI
 import Keter.RateLimiter.SlidingWindow (allowRequest)
-import Keter.RateLimiter.RequestUtils
 import Keter.RateLimiter.IPZones (defaultIPZone)
 import Data.CaseInsensitive (mk)
 import Data.IORef (newIORef, modifyIORef', readIORef)
@@ -96,7 +95,7 @@ tests = testGroup "Sliding Window Tests"
             { throttleLimit = 2
             , throttlePeriod = 60
             , throttleAlgorithm = SlidingWindow
-            , throttleIdentifier = byIP
+            , throttleIdentifierBy = IdIP
             , throttleTokenBucketTTL = Nothing
             }
       env' <- addThrottle env (T.pack "test_throttle") throttle
@@ -114,7 +113,7 @@ tests = testGroup "Sliding Window Tests"
             { throttleLimit = 2
             , throttlePeriod = 60
             , throttleAlgorithm = SlidingWindow
-            , throttleIdentifier = byIP
+            , throttleIdentifierBy = IdIP
             , throttleTokenBucketTTL = Nothing
             }
       env' <- addThrottle env (T.pack "test_throttle") throttle
@@ -134,7 +133,7 @@ tests = testGroup "Sliding Window Tests"
             { throttleLimit = 2
             , throttlePeriod = 60
             , throttleAlgorithm = SlidingWindow
-            , throttleIdentifier = byIP
+            , throttleIdentifierBy = IdIP
             , throttleTokenBucketTTL = Nothing
             }
       env' <- addThrottle env (T.pack "test_throttle") throttle
@@ -152,7 +151,7 @@ tests = testGroup "Sliding Window Tests"
             { throttleLimit = 2
             , throttlePeriod = 60
             , throttleAlgorithm = SlidingWindow
-            , throttleIdentifier = byIP
+            , throttleIdentifierBy = IdIP
             , throttleTokenBucketTTL = Nothing
             }
       env' <- addThrottle env (T.pack "test_throttle") throttle
@@ -172,7 +171,7 @@ tests = testGroup "Sliding Window Tests"
             { throttleLimit = 2
             , throttlePeriod = 60
             , throttleAlgorithm = SlidingWindow
-            , throttleIdentifier = byIP
+            , throttleIdentifierBy = IdIP
             , throttleTokenBucketTTL = Nothing
             }
       env' <- addThrottle env (T.pack "test_throttle") throttle
@@ -193,7 +192,7 @@ tests = testGroup "Sliding Window Tests"
             { throttleLimit = 2
             , throttlePeriod = 60
             , throttleAlgorithm = SlidingWindow
-            , throttleIdentifier = byIP
+            , throttleIdentifierBy = IdIP
             , throttleTokenBucketTTL = Nothing
             }
       env' <- addThrottle env (T.pack "test_throttle") throttle
@@ -214,7 +213,7 @@ tests = testGroup "Sliding Window Tests"
             { throttleLimit = 2
             , throttlePeriod = 60
             , throttleAlgorithm = SlidingWindow
-            , throttleIdentifier = byIP
+            , throttleIdentifierBy = IdIP
             , throttleTokenBucketTTL = Nothing
             }
       env' <- addThrottle env (T.pack "test_throttle") throttle
@@ -240,7 +239,7 @@ tests = testGroup "Sliding Window Tests"
             { throttleLimit = 10
             , throttlePeriod = 60
             , throttleAlgorithm = SlidingWindow
-            , throttleIdentifier = byIP
+            , throttleIdentifierBy = IdIP
             , throttleTokenBucketTTL = Nothing
             }
       env' <- addThrottle env (T.pack "test_throttle") throttle

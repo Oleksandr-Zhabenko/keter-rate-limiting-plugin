@@ -40,8 +40,8 @@ import Network.HTTP.Types (status200, status429, statusCode)
 import Network.Socket (SockAddr(..), tupleToHostAddress)
 import Data.CaseInsensitive (mk)
 import qualified Data.Text.Encoding as TE
-import Keter.RateLimiter.RequestUtils
-import Keter.RateLimiter.WAI (ThrottleConfig(..), attackMiddleware, addThrottle, initConfig)
+--import Keter.RateLimiter.RequestUtils
+import Keter.RateLimiter.WAI (ThrottleConfig(..), IdentifierBy(..), attackMiddleware, addThrottle, initConfig)
 import Keter.RateLimiter.Cache (Algorithm(..))
 import Keter.RateLimiter.IPZones (defaultIPZone)
 
@@ -85,7 +85,7 @@ testPredictableTiming = testGroup "Predictable Timing Tests"
             { throttleLimit = 3
             , throttlePeriod = 10
             , throttleAlgorithm = TokenBucket
-            , throttleIdentifier = byIP
+            , throttleIdentifierBy = IdIP
             , throttleTokenBucketTTL = Just ttlSeconds
             }
       env' <- addThrottle env (Text.pack "test_throttle") throttleConfig
@@ -98,7 +98,7 @@ testPredictableTiming = testGroup "Predictable Timing Tests"
             { throttleLimit = 2
             , throttlePeriod = 20
             , throttleAlgorithm = TokenBucket
-            , throttleIdentifier = byIP
+            , throttleIdentifierBy = IdIP
             , throttleTokenBucketTTL = Just 2
             }
       env' <- addThrottle env (Text.pack "test_throttle") throttle
@@ -122,7 +122,7 @@ testScenarios = testGroup "Scenario Tests"
             { throttleLimit = 3
             , throttlePeriod = 10
             , throttleAlgorithm = TokenBucket
-            , throttleIdentifier = byIP
+            , throttleIdentifierBy = IdIP
             , throttleTokenBucketTTL = Just 10
             }
       env' <- addThrottle env (Text.pack "test_throttle") throttle
@@ -138,7 +138,7 @@ testScenarios = testGroup "Scenario Tests"
             { throttleLimit = 2
             , throttlePeriod = 5
             , throttleAlgorithm = TokenBucket
-            , throttleIdentifier = byIP
+            , throttleIdentifierBy = IdIP
             , throttleTokenBucketTTL = Just 10
             }
       env' <- addThrottle env (Text.pack "test_throttle") throttle
@@ -158,7 +158,7 @@ testScenarios = testGroup "Scenario Tests"
             { throttleLimit = 2
             , throttlePeriod = 5
             , throttleAlgorithm = TokenBucket
-            , throttleIdentifier = byIP
+            , throttleIdentifierBy = IdIP
             , throttleTokenBucketTTL = Just 10
             }
       env' <- addThrottle env (Text.pack "test_throttle") throttle
@@ -184,7 +184,7 @@ testStress = testGroup "Stress Tests"
             { throttleLimit = 10
             , throttlePeriod = 10
             , throttleAlgorithm = TokenBucket
-            , throttleIdentifier = byIP
+            , throttleIdentifierBy = IdIP
             , throttleTokenBucketTTL = Just 10
             }
       env' <- addThrottle env (Text.pack "test_throttle") throttle
@@ -208,7 +208,7 @@ testEdgeCases = testGroup "Edge Case Tests"
             { throttleLimit = 0
             , throttlePeriod = 10
             , throttleAlgorithm = TokenBucket
-            , throttleIdentifier = byIP
+            , throttleIdentifierBy = IdIP
             , throttleTokenBucketTTL = Just 10
             }
       env' <- addThrottle env (Text.pack "test_throttle") throttle
@@ -223,7 +223,7 @@ testEdgeCases = testGroup "Edge Case Tests"
             { throttleLimit = 1
             , throttlePeriod = 10
             , throttleAlgorithm = TokenBucket
-            , throttleIdentifier = byIP
+            , throttleIdentifierBy = IdIP
             , throttleTokenBucketTTL = Just 10
             }
       env' <- addThrottle env (Text.pack "test_throttle") throttle
@@ -240,7 +240,7 @@ testEdgeCases = testGroup "Edge Case Tests"
             { throttleLimit = 2
             , throttlePeriod = 0
             , throttleAlgorithm = TokenBucket
-            , throttleIdentifier = byIP
+            , throttleIdentifierBy = IdIP
             , throttleTokenBucketTTL = Just 10
             }
       env' <- addThrottle env (Text.pack "test_throttle") throttle
@@ -262,7 +262,7 @@ testEdgeCases = testGroup "Edge Case Tests"
             { throttleLimit = 2
             , throttlePeriod = 1  -- Changed from 0.1 to 1 (Int)
             , throttleAlgorithm = TokenBucket
-            , throttleIdentifier = byIP
+            , throttleIdentifierBy = IdIP
             , throttleTokenBucketTTL = Just 10
             }
       env' <- addThrottle env (Text.pack "test_throttle") throttle

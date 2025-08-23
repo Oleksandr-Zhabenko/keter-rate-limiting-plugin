@@ -13,30 +13,33 @@ Portability : POSIX
 This module provides a comprehensive test suite for the WAI (Web Application Interface) middleware responsible for rate limiting. It uses the tasty, tasty-hunit, and tasty-quickcheck frameworks to define and run tests.
 
 The tests cover five distinct rate-limiting algorithms:
-  * Fixed Window
-  * Sliding Window
-  * Token Bucket
-  * Leaky Bucket
-  * TinyLRU
+
+* Fixed Window
+* Sliding Window
+* Token Bucket
+* Leaky Bucket
+* TinyLRU
 
 For each algorithm, the following scenarios are tested:
-  * Allowing requests under the defined limit.
-  * Blocking requests exceeding the defined limit.
-  * Correctly handling IPv4 and IPv6 addresses.
-  * Ensuring rate-limiting window resets correctly over time.
-  * Identifying clients using proxy headers like @x-forwarded-for@ and @x-real-ip@.
-  * Managing concurrent requests to prevent race conditions.
-  * Simulating high-volume concurrent requests to test DoS protection.
+
+* Allowing requests under the defined limit.
+* Blocking requests exceeding the defined limit.
+* Correctly handling IPv4 and IPv6 addresses.
+* Ensuring rate-limiting window resets correctly over time.
+* Identifying clients using proxy headers like @x-forwarded-for@ and @x-real-ip@.
+* Managing concurrent requests to prevent race conditions.
+* Simulating high-volume concurrent requests to test DoS protection.
 
 Additional tests cover:
-  * Configuration-driven middleware (buildRateLimiter).
-  * Multiple throttle rules simultaneously.
-  * Different identifier strategies (header, cookie, combined).
-  * Zone-based separation.
-  * JSON configuration parsing.
-  * Cache management functions.
-  * Error handling and edge cases.
-  * Property-based tests for robustness.
+
+* Configuration-driven middleware (buildRateLimiter).
+* Multiple throttle rules simultaneously.
+* Different identifier strategies (header, cookie, combined).
+* Zone-based separation.
+* JSON configuration parsing.
+* Cache management functions.
+* Error handling and edge cases.
+* Property-based tests for robustness.
 
 The module defines helper functions to create mock requests and a mock application to isolate the middleware for testing.
 -}
@@ -54,7 +57,7 @@ import Network.Wai
 import Network.Wai.Test
 import Network.HTTP.Types
 import Network.Socket (SockAddr(..), tupleToHostAddress)
-import Data.Text (Text)
+import Data.Text (Text, intercalate)
 import Control.Concurrent.STM (readTVarIO)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -67,13 +70,12 @@ import Control.Concurrent (threadDelay, forkIO)
 import Control.Concurrent.MVar
 import Control.Monad (replicateM)
 import Control.Monad.IO.Class (liftIO)
-import Data.IORef
 import qualified Web.Cookie as WC
 import qualified Data.Text.Encoding.Error as TEE
 import Keter.RateLimiter.IPZones (defaultIPZone)
 import Keter.RateLimiter.WAI
-import Keter.RateLimiter.RequestUtils
 import Keter.RateLimiter.Cache (Algorithm(..))
+import Text.Printf (printf)
 
 -- * Request Helpers
 
@@ -93,13 +95,13 @@ mkIPv6Request = defaultRequest { remoteHost = SockAddrInet6 0 0 (0, 0, 0, 1) 0 }
 mkRequestWithHeader :: Text -> Text -> Request
 mkRequestWithHeader name value = defaultRequest {
   requestHeaders = [(mk (TE.encodeUtf8 name), TE.encodeUtf8 value)]
-}
+  }
 
 -- | Creates a mock 'Request' with a cookie header.
 mkRequestWithCookie :: Text -> Text -> Request
 mkRequestWithCookie name value = defaultRequest {
   requestHeaders = [(mk "Cookie", TE.encodeUtf8 $ name <> "=" <> value)]
-}
+  }
 
 -- | Creates a mock 'Request' with an @x-forwarded-for@ header.
 mkRequestWithXFF :: Text -> Request
@@ -114,8 +116,8 @@ extractCookieWC :: Text -> BS.ByteString -> Maybe Text
 extractCookieWC name raw =
   let pairs = WC.parseCookies raw
   in case lookup (TE.encodeUtf8 name) pairs of
-       Just v | not (BS.null v) -> Just (TE.decodeUtf8With TEE.lenientDecode v)
-       _ -> Nothing
+    Just v | not (BS.null v) -> Just (TE.decodeUtf8With TEE.lenientDecode v)
+    _                       -> Nothing
 
 -- * Test Suite Definition
 
@@ -144,15 +146,15 @@ algorithmTests = testGroup "Algorithm-Specific Tests"
   ]
   where
     algorithmTestGroup algo = testGroup (show algo ++ " Algorithm")
-      [ testCase "Allows IPv4 requests below limit" $ testBelowLimit algo byIP mkIPv4Request
-      , testCase "Blocks IPv4 requests exceeding limit" $ testExceedLimit algo byIP mkIPv4Request
-      , testCase "Allows IPv6 requests below limit" $ testBelowLimit algo byIP mkIPv6Request
-      , testCase "Blocks IPv6 requests exceeding limit" $ testExceedLimit algo byIP mkIPv6Request
-      , testCase "Respects timing with IPv4" $ testTiming algo byIP
-      , testCase "Handles x-forwarded-for header for IPv4" $ testXFF algo byIP
-      , testCase "Handles x-real-ip header for IPv6" $ testRealIP algo byIP
-      , testCase "Handles concurrent requests" $ testConcurrent algo byIP
-      , testCase "Handles DoS-like concurrency" $ testDoS algo byIP
+      [ testCase "Allows IPv4 requests below limit" $ testBelowLimit algo IdIP mkIPv4Request
+      , testCase "Blocks IPv4 requests exceeding limit" $ testExceedLimit algo IdIP mkIPv4Request
+      , testCase "Allows IPv6 requests below limit" $ testBelowLimit algo IdIP mkIPv6Request
+      , testCase "Blocks IPv6 requests exceeding limit" $ testExceedLimit algo IdIP mkIPv6Request
+      , testCase "Respects timing with IPv4" $ testTiming algo IdIP
+      , testCase "Handles x-forwarded-for header for IPv4" $ testXFF algo IdIP
+      , testCase "Handles x-real-ip header for IPv6" $ testRealIP algo IdIP
+      , testCase "Handles concurrent requests" $ testConcurrent algo IdIP
+      , testCase "Handles DoS-like concurrency" $ testDoS algo IdIP
       ]
 
 -- | Test buildRateLimiter with various configurations.
@@ -238,12 +240,11 @@ propertyBasedTests = testGroup "Property-Based Tests"
   , testProperty "Header name round-trip" propHeaderNameRoundTrip
   , testProperty "IP extraction consistency" propIPExtraction
   , testProperty "Rate limiting monotonicity" propRateLimitingMonotonicity
+  , testProperty "Identifier independence" propIdentifierIndependence
   ]
 
--- * Test Case Implementations
-
 -- | Verifies that requests below the limit are allowed.
-testBelowLimit :: Algorithm -> (Request -> IO (Maybe Text)) -> Request -> Assertion
+testBelowLimit :: Algorithm -> IdentifierBy -> Request -> Assertion
 testBelowLimit algo identifier req = do
   env <- initConfig (const defaultIPZone)
   let throttle = ThrottleConfig 2 60 algo identifier (Just 3600)
@@ -258,7 +259,7 @@ testBelowLimit algo identifier req = do
   assertEqual "Second request status" status200 (simpleStatus response2)
 
 -- | Verifies that requests exceeding the limit are blocked.
-testExceedLimit :: Algorithm -> (Request -> IO (Maybe Text)) -> Request -> Assertion
+testExceedLimit :: Algorithm -> IdentifierBy -> Request -> Assertion
 testExceedLimit algo identifier req = do
   env <- initConfig (const defaultIPZone)
   let throttle = ThrottleConfig 2 60 algo identifier (Just 3600)
@@ -273,7 +274,7 @@ testExceedLimit algo identifier req = do
   assertEqual "Third request status" status429 (simpleStatus response3)
 
 -- | Verifies that the rate limit counter resets after the window period.
-testTiming :: Algorithm -> (Request -> IO (Maybe Text)) -> Assertion
+testTiming :: Algorithm -> IdentifierBy -> Assertion
 testTiming algo identifier = do
   env <- initConfig (const defaultIPZone)
   let throttle = ThrottleConfig 1 1 algo identifier (Just 3600)
@@ -290,7 +291,7 @@ testTiming algo identifier = do
   assertEqual "Second request status after reset" status200 (simpleStatus response2)
 
 -- | Verifies correct IP identification using x-forwarded-for header.
-testXFF :: Algorithm -> (Request -> IO (Maybe Text)) -> Assertion
+testXFF :: Algorithm -> IdentifierBy -> Assertion
 testXFF algo identifier = do
   env <- initConfig (const defaultIPZone)
   let throttle = ThrottleConfig 1 60 algo identifier (Just 3600)
@@ -305,7 +306,7 @@ testXFF algo identifier = do
   assertEqual "Second XFF request status" status429 (simpleStatus response2)
 
 -- | Verifies correct IP identification using x-real-ip header.
-testRealIP :: Algorithm -> (Request -> IO (Maybe Text)) -> Assertion
+testRealIP :: Algorithm -> IdentifierBy -> Assertion
 testRealIP algo identifier = do
   env <- initConfig (const defaultIPZone)
   let throttle = ThrottleConfig 1 60 algo identifier (Just 3600)
@@ -320,7 +321,7 @@ testRealIP algo identifier = do
   assertEqual "Second Real-IP request status" status429 (simpleStatus response2)
 
 -- | Verifies behavior under moderate concurrent load.
-testConcurrent :: Algorithm -> (Request -> IO (Maybe Text)) -> Assertion
+testConcurrent :: Algorithm -> IdentifierBy -> Assertion
 testConcurrent algo identifier = do
   env <- initConfig (const defaultIPZone)
   let throttle = ThrottleConfig 5 60 algo identifier (Just 3600)
@@ -331,12 +332,11 @@ testConcurrent algo identifier = do
         result6 <- srequest $ SRequest mkIPv4Request ""
         return (responses, result6)
   (responses, response6) <- runSession session app
-  mapM_ (\(i, resp) -> assertEqual ("Request " ++ show i ++ " status") status200 (simpleStatus resp))
-        (zip [1..5] responses)
+  mapM_ (\(i, resp) -> assertEqual ("Request " ++ show i ++ " status") status200 (simpleStatus resp)) (zip [1..5] responses)
   assertEqual "Sixth request status after limit" status429 (simpleStatus response6)
 
 -- | Simulates a DoS attack with high concurrency.
-testDoS :: Algorithm -> (Request -> IO (Maybe Text)) -> Assertion
+testDoS :: Algorithm -> IdentifierBy -> Assertion
 testDoS algo identifier = do
   env <- initConfig (const defaultIPZone)
   let throttle = ThrottleConfig 10 60 algo identifier (Just 3600)
@@ -356,7 +356,7 @@ testDoS algo identifier = do
 testBuildSingleThrottle :: Assertion
 testBuildSingleThrottle = do
   let config = RateLimiterConfig ZoneDefault
-        [ RLThrottle "api-limit" 5 60 FixedWindow IdIP Nothing ]
+                 [ RLThrottle "api-limit" 5 60 FixedWindow IdIP Nothing ]
   middleware <- buildRateLimiter config
   let app = middleware mockApp
   let session = replicateM 6 (srequest $ SRequest mkIPv4Request "")
@@ -370,9 +370,9 @@ testBuildSingleThrottle = do
 testBuildMultipleThrottles :: Assertion
 testBuildMultipleThrottles = do
   let config = RateLimiterConfig ZoneDefault
-        [ RLThrottle "global-limit" 10 60 FixedWindow IdIP Nothing
-        , RLThrottle "api-limit" 3 60 SlidingWindow (IdHeader "X-API-Key") Nothing
-        ]
+                 [ RLThrottle "global-limit" 10 60 FixedWindow IdIP Nothing
+                 , RLThrottle "api-limit" 3 60 SlidingWindow (IdHeader "X-API-Key") Nothing
+                 ]
   middleware <- buildRateLimiter config
   let app = middleware mockApp
   let requestWithApi = mkRequestWithHeader "X-API-Key" "test-key"
@@ -390,7 +390,7 @@ testBuildMultipleThrottles = do
 testBuildWithZones :: Assertion
 testBuildWithZones = do
   let config = RateLimiterConfig (ZoneHeader "X-Zone")
-        [ RLThrottle "zone-limit" 2 60 FixedWindow IdIP Nothing ]
+                 [ RLThrottle "zone-limit" 2 60 FixedWindow IdIP Nothing ]
   middleware <- buildRateLimiter config
   let app = middleware mockApp
   let zoneAReq = mkRequestWithHeader "X-Zone" "A"
@@ -403,9 +403,7 @@ testBuildWithZones = do
         ra3 <- srequest $ SRequest zoneAReq ""
         return [ra1, ra2, rb1, rb2, ra3]
   responses <- runSession session app
-  assertEqual "Zone separation works"
-    [status200, status200, status200, status200, status429]
-    (map simpleStatus responses)
+  assertEqual "Zone separation works" [status200, status200, status200, status200, status429] (map simpleStatus responses)
 
 -- | Tests buildRateLimiter with an empty throttles list.
 testEmptyThrottles :: Assertion
@@ -421,8 +419,8 @@ testEmptyThrottles = do
 testMultipleSameAlgo :: Assertion
 testMultipleSameAlgo = do
   env <- initConfig (const defaultIPZone)
-  let throttle1 = ThrottleConfig 5 60 FixedWindow (mkIdentifier IdIP) Nothing
-  let throttle2 = ThrottleConfig 3 60 FixedWindow (mkIdentifier IdIP) Nothing
+  let throttle1 = ThrottleConfig 5 60 FixedWindow IdIP Nothing
+  let throttle2 = ThrottleConfig 3 60 FixedWindow IdIP Nothing
   env' <- addThrottle env "global" throttle1 >>= \e -> addThrottle e "strict" throttle2
   let app = attackMiddleware env' mockApp
   let session = replicateM 4 (srequest $ SRequest mkIPv4Request "")
@@ -434,8 +432,8 @@ testMultipleSameAlgo = do
 testMultipleDiffAlgo :: Assertion
 testMultipleDiffAlgo = do
   env <- initConfig (const defaultIPZone)
-  let throttle1 = ThrottleConfig 10 60 FixedWindow (mkIdentifier IdIP) Nothing
-  let throttle2 = ThrottleConfig 5 60 TokenBucket (mkIdentifier IdIP) (Just 120)
+  let throttle1 = ThrottleConfig 10 60 FixedWindow IdIP Nothing
+  let throttle2 = ThrottleConfig 5 60 TokenBucket IdIP (Just 120)
   env' <- addThrottle env "fixed" throttle1 >>= \e -> addThrottle e "bucket" throttle2
   let app = attackMiddleware env' mockApp
   let session = replicateM 6 (srequest $ SRequest mkIPv4Request "")
@@ -447,8 +445,8 @@ testMultipleDiffAlgo = do
 testThrottlePriority :: Assertion
 testThrottlePriority = do
   env <- initConfig (const defaultIPZone)
-  let permissive = ThrottleConfig 1000 60 FixedWindow (mkIdentifier IdIP) Nothing
-  let restrictive = ThrottleConfig 1 60 FixedWindow (mkIdentifier IdIP) Nothing
+  let permissive = ThrottleConfig 1000 60 FixedWindow IdIP Nothing
+  let restrictive = ThrottleConfig 1 60 FixedWindow IdIP Nothing
   env' <- addThrottle env "permissive" permissive >>= \e -> addThrottle e "restrictive" restrictive
   let app = attackMiddleware env' mockApp
   let session = do
@@ -462,8 +460,8 @@ testThrottlePriority = do
 testIndependentCounters :: Assertion
 testIndependentCounters = do
   env <- initConfig (const defaultIPZone)
-  let ipThrottle = ThrottleConfig 2 60 FixedWindow (mkIdentifier IdIP) Nothing
-  let headerThrottle = ThrottleConfig 2 60 FixedWindow (mkIdentifier (IdHeader "X-User-ID")) Nothing
+  let ipThrottle = ThrottleConfig 2 60 FixedWindow IdIP Nothing
+  let headerThrottle = ThrottleConfig 2 60 FixedWindow (IdHeader "X-User-ID") Nothing
   env' <- addThrottle env "ip" ipThrottle >>= \e -> addThrottle e "user" headerThrottle
   let app = attackMiddleware env' mockApp
   let userReq = mkRequestWithHeader "X-User-ID" "user123"
@@ -480,7 +478,7 @@ testIndependentCounters = do
 testIdHeaderStrategy :: Assertion
 testIdHeaderStrategy = do
   env <- initConfig (const defaultIPZone)
-  let throttle = ThrottleConfig 2 60 FixedWindow (mkIdentifier (IdHeader "X-Client-ID")) Nothing
+  let throttle = ThrottleConfig 2 60 FixedWindow (IdHeader "X-Client-ID") Nothing
   env' <- addThrottle env "header" throttle
   let app = attackMiddleware env' mockApp
   let client1Req = mkRequestWithHeader "X-Client-ID" "client1"
@@ -501,7 +499,7 @@ testIdHeaderStrategy = do
 testIdCookieStrategy :: Assertion
 testIdCookieStrategy = do
   env <- initConfig (const defaultIPZone)
-  let throttle = ThrottleConfig 1 60 FixedWindow (mkIdentifier (IdCookie "session")) Nothing
+  let throttle = ThrottleConfig 1 60 FixedWindow (IdCookie "session") Nothing
   env' <- addThrottle env "cookie" throttle
   let app = attackMiddleware env' mockApp
   let session1Req = mkRequestWithCookie "session" "sess123"
@@ -520,7 +518,7 @@ testIdCookieStrategy = do
 testIdIPAndPathStrategy :: Assertion
 testIdIPAndPathStrategy = do
   env <- initConfig (const defaultIPZone)
-  let throttle = ThrottleConfig 1 60 FixedWindow (mkIdentifier IdIPAndPath) Nothing
+  let throttle = ThrottleConfig 1 60 FixedWindow IdIPAndPath Nothing
   env' <- addThrottle env "ip-path" throttle
   let app = attackMiddleware env' mockApp
   let path1Req = mkIPv4Request { rawPathInfo = "/api/v1" }
@@ -539,7 +537,7 @@ testIdIPAndPathStrategy = do
 testIdIPAndUAStrategy :: Assertion
 testIdIPAndUAStrategy = do
   env <- initConfig (const defaultIPZone)
-  let throttle = ThrottleConfig 1 60 FixedWindow (mkIdentifier IdIPAndUA) Nothing
+  let throttle = ThrottleConfig 1 60 FixedWindow IdIPAndUA Nothing
   env' <- addThrottle env "ip-ua" throttle
   let app = attackMiddleware env' mockApp
   let ua1Req = mkRequestWithHeader "User-Agent" "Browser/1.0"
@@ -558,7 +556,7 @@ testIdIPAndUAStrategy = do
 testIdHeaderAndIPStrategy :: Assertion
 testIdHeaderAndIPStrategy = do
   env <- initConfig (const defaultIPZone)
-  let throttle = ThrottleConfig 1 60 FixedWindow (mkIdentifier (IdHeaderAndIP "X-Service")) Nothing
+  let throttle = ThrottleConfig 1 60 FixedWindow (IdHeaderAndIP "X-Service") Nothing
   env' <- addThrottle env "header-ip" throttle
   let app = attackMiddleware env' mockApp
   let service1Req = mkRequestWithHeader "X-Service" "service1"
@@ -577,7 +575,7 @@ testIdHeaderAndIPStrategy = do
 testMissingIdentifiers :: Assertion
 testMissingIdentifiers = do
   env <- initConfig (const defaultIPZone)
-  let throttle = ThrottleConfig 1 60 FixedWindow (mkIdentifier (IdHeader "Missing-Header")) Nothing
+  let throttle = ThrottleConfig 1 60 FixedWindow (IdHeader "Missing-Header") Nothing
   env' <- addThrottle env "missing" throttle
   let app = attackMiddleware env' mockApp
   let session = replicateM 5 (srequest $ SRequest mkIPv4Request "")
@@ -597,14 +595,15 @@ testCookieParsing = do
         , ("malformed", Nothing)
         ]
   mapM_ (\(cookie, expected) -> do
-    let result = extractCookieWC "session" (TE.encodeUtf8 cookie)
-    assertEqual ("Cookie parsing: " <> T.unpack cookie) expected result) testCases
+            let result = extractCookieWC "session" (TE.encodeUtf8 cookie)
+            assertEqual ("Cookie parsing: " <> T.unpack cookie) expected result
+        ) testCases
 
 -- | Tests IP-based zone separation.
 testZoneIPSeparation :: Assertion
 testZoneIPSeparation = do
   let config = RateLimiterConfig ZoneIP
-        [ RLThrottle "ip-zone" 1 60 FixedWindow IdIP Nothing ]
+                 [ RLThrottle "ip-zone" 1 60 FixedWindow IdIP Nothing ]
   middleware <- buildRateLimiter config
   let app = middleware mockApp
   let ip1Req = mkRequestWithXFF "192.168.1.1"
@@ -624,7 +623,7 @@ testZoneIPSeparation = do
 testZoneHeaderSeparation :: Assertion
 testZoneHeaderSeparation = do
   let config = RateLimiterConfig (ZoneHeader "X-Tenant")
-        [ RLThrottle "tenant-limit" 1 60 FixedWindow IdIP Nothing ]
+                 [ RLThrottle "tenant-limit" 1 60 FixedWindow IdIP Nothing ]
   middleware <- buildRateLimiter config
   let app = middleware mockApp
   let tenant1Req = mkRequestWithHeader "X-Tenant" "tenant1"
@@ -643,7 +642,7 @@ testZoneHeaderSeparation = do
 testZoneCreation :: Assertion
 testZoneCreation = do
   env <- initConfig (\req -> maybe "default" TE.decodeUtf8 (lookup (mk "X-Zone") (requestHeaders req)))
-  let throttle = ThrottleConfig 1 60 FixedWindow (mkIdentifier IdIP) Nothing
+  let throttle = ThrottleConfig 1 60 FixedWindow IdIP Nothing
   env' <- addThrottle env "test" throttle
   let zone1Req = mkRequestWithHeader "X-Zone" "zone1"
   let zone2Req = mkRequestWithHeader "X-Zone" "zone2"
@@ -659,7 +658,7 @@ testZoneCreation = do
 testDefaultZoneFallback :: Assertion
 testDefaultZoneFallback = do
   let config = RateLimiterConfig (ZoneHeader "Missing-Header")
-        [ RLThrottle "default-fallback" 1 60 FixedWindow IdIP Nothing ]
+                 [ RLThrottle "default-fallback" 1 60 FixedWindow IdIP Nothing ]
   middleware <- buildRateLimiter config
   let app = middleware mockApp
   let session = do
@@ -681,14 +680,16 @@ testParseIdentifierBy = do
         , ("{\"header\": \"X-API-Key\"}", Right (IdHeader (hdr "X-API-Key")))
         , ("{\"cookie\": \"session\"}", Right (IdCookie "session"))
         , ("{\"header+ip\": \"X-User\"}", Right (IdHeaderAndIP (hdr "X-User")))
-        , ("\"invalid\"", Left ("identifier_by must be one of:" :: String))
+        , ("\"invalid\"", Left ("Error in $: identifier_by: 'ip' | 'ip+path' | 'ip+ua' | {header} | {cookie} | {header+ip}" :: String))
         ]
   mapM_ (\(json, expected) -> do
-    let result = eitherDecode (LBS.fromStrict $ TE.encodeUtf8 json) :: Either String IdentifierBy
-    case (result, expected) of
-      (Right actual, Right expected') -> assertEqual ("Parse: " <> T.unpack json) expected' actual
-      (Left _, Left _) -> return ()
-      _ -> assertFailure $ "Unexpected result for: " <> T.unpack json) testCases
+          let result = eitherDecode (LBS.fromStrict $ TE.encodeUtf8 json) :: Either String IdentifierBy
+          case (result, expected) of
+            (Right actual, Right expected') -> assertEqual ("Parse: " <> T.unpack json) expected' actual
+            (Left _, Left _) -> return ()
+            (Left err, Right _) -> assertFailure $ "Parse failed unexpectedly for " <> T.unpack json <> ": " <> err
+            (Right res, Left _) -> assertFailure $ "Parse succeeded unexpectedly for " <> T.unpack json <> ": " <> show res
+        ) testCases
 
 -- | Tests parsing of ZoneBy JSON.
 testParseZoneBy :: Assertion
@@ -697,14 +698,16 @@ testParseZoneBy = do
         [ ("\"default\"", Right ZoneDefault)
         , ("\"ip\"", Right ZoneIP)
         , ("{\"header\": \"X-Region\"}", Right (ZoneHeader (hdr "X-Region")))
-        , ("\"invalid\"", Left ("zone_by must be" :: String))
+        , ("\"invalid\"", Left ("Error in $: zone_by: 'default' | 'ip' | {header}" :: String))
         ]
   mapM_ (\(json, expected) -> do
-    let result = eitherDecode (LBS.fromStrict $ TE.encodeUtf8 json) :: Either String ZoneBy
-    case (result, expected) of
-      (Right actual, Right expected') -> assertEqual ("Parse: " <> T.unpack json) expected' actual
-      (Left _, Left _) -> return ()
-      _ -> assertFailure $ "Unexpected result for: " <> T.unpack json) testCases
+          let result = eitherDecode (LBS.fromStrict $ TE.encodeUtf8 json) :: Either String ZoneBy
+          case (result, expected) of
+            (Right actual, Right expected') -> assertEqual ("Parse: " <> T.unpack json) expected' actual
+            (Left _, Left _) -> return ()
+            (Left err, Right _) -> assertFailure $ "Parse failed unexpectedly for " <> T.unpack json <> ": " <> err
+            (Right res, Left _) -> assertFailure $ "Parse succeeded unexpectedly for " <> T.unpack json <> ": " <> show res
+        ) testCases
 
 -- | Tests parsing of RLThrottle JSON.
 testParseRLThrottle :: Assertion
@@ -743,7 +746,7 @@ testInvalidJSON = do
 testCacheResetAll :: Assertion
 testCacheResetAll = do
   env <- initConfig (const defaultIPZone)
-  let throttle = ThrottleConfig 1 60 FixedWindow (mkIdentifier IdIP) Nothing
+  let throttle = ThrottleConfig 1 60 FixedWindow IdIP Nothing
   env' <- addThrottle env "test" throttle
   let app = attackMiddleware env' mockApp
   let session1 = srequest $ SRequest mkIPv4Request ""
@@ -761,7 +764,7 @@ testCacheResetAll = do
 testZoneCacheIsolation :: Assertion
 testZoneCacheIsolation = do
   env <- initConfig (\req -> maybe "A" TE.decodeUtf8 (lookup (mk "X-Zone") (requestHeaders req)))
-  let throttle = ThrottleConfig 1 60 FixedWindow (mkIdentifier IdIP) Nothing
+  let throttle = ThrottleConfig 1 60 FixedWindow IdIP Nothing
   env' <- addThrottle env "test" throttle
   let app = attackMiddleware env' mockApp
   let zoneAReq = mkRequestWithHeader "X-Zone" "A"
@@ -780,7 +783,7 @@ testZoneCacheIsolation = do
 testMemoryCleanup :: Assertion
 testMemoryCleanup = do
   env <- initConfig (const defaultIPZone)
-  let throttle = ThrottleConfig 100 60 FixedWindow (mkIdentifier IdIP) Nothing
+  let throttle = ThrottleConfig 100 60 FixedWindow IdIP Nothing
   env' <- addThrottle env "test" throttle
   cacheResetAll env'
   cacheResetAll env'
@@ -791,7 +794,7 @@ testMemoryCleanup = do
 testZeroPeriod :: Assertion
 testZeroPeriod = do
   env <- initConfig (const defaultIPZone)
-  let throttle = ThrottleConfig 10 0 TokenBucket (mkIdentifier IdIP) (Just 60)
+  let throttle = ThrottleConfig 10 0 TokenBucket IdIP (Just 60)
   env' <- addThrottle env "zero-period" throttle
   _ <- instrument env' mkIPv4Request
   return ()
@@ -800,7 +803,7 @@ testZeroPeriod = do
 testNegativeLimit :: Assertion
 testNegativeLimit = do
   env <- initConfig (const defaultIPZone)
-  let throttle = ThrottleConfig (-1) 60 FixedWindow (mkIdentifier IdIP) Nothing
+  let throttle = ThrottleConfig (-1) 60 FixedWindow IdIP Nothing
   env' <- addThrottle env "negative" throttle
   _ <- instrument env' mkIPv4Request
   return ()
@@ -809,7 +812,7 @@ testNegativeLimit = do
 testLargeNumbers :: Assertion
 testLargeNumbers = do
   env <- initConfig (const defaultIPZone)
-  let throttle = ThrottleConfig (maxBound :: Int) (maxBound :: Int) FixedWindow (mkIdentifier IdIP) Nothing
+  let throttle = ThrottleConfig (maxBound :: Int) (maxBound :: Int) FixedWindow IdIP Nothing
   env' <- addThrottle env "large" throttle
   blocked <- instrument env' mkIPv4Request
   assertEqual "Large numbers handled" False blocked
@@ -818,7 +821,7 @@ testLargeNumbers = do
 testMalformedRequests :: Assertion
 testMalformedRequests = do
   env <- initConfig (const defaultIPZone)
-  let throttle = ThrottleConfig 5 60 FixedWindow (mkIdentifier (IdHeader "X-Malformed")) Nothing
+  let throttle = ThrottleConfig 5 60 FixedWindow (IdHeader "X-Malformed") Nothing
   env' <- addThrottle env "malformed" throttle
   let malformedReq = defaultRequest { requestHeaders = [(mk "X-Malformed", "\xFF\xFE\xFD")] }
   _ <- instrument env' malformedReq
@@ -828,7 +831,7 @@ testMalformedRequests = do
 testConcurrentSafety :: Assertion
 testConcurrentSafety = do
   env <- initConfig (const defaultIPZone)
-  let throttle = ThrottleConfig 100 60 FixedWindow (mkIdentifier IdIP) Nothing
+  let throttle = ThrottleConfig 100 60 FixedWindow IdIP Nothing
   env' <- addThrottle env "concurrent" throttle
   results <- newMVar []
   let worker :: Integer -> IO ()
@@ -847,7 +850,7 @@ testConcurrentSafety = do
 testHighThroughputSingle :: Assertion
 testHighThroughputSingle = do
   env <- initConfig (const defaultIPZone)
-  let throttle = ThrottleConfig 1000 60 FixedWindow (mkIdentifier IdIP) Nothing
+  let throttle = ThrottleConfig 1000 60 FixedWindow IdIP Nothing
   env' <- addThrottle env "throughput" throttle
   let app = attackMiddleware env' mockApp
   let session = replicateM 500 (srequest $ SRequest mkIPv4Request "")
@@ -859,7 +862,7 @@ testHighThroughputSingle = do
 testManyClients :: Assertion
 testManyClients = do
   env <- initConfig (const defaultIPZone)
-  let throttle = ThrottleConfig 2 60 FixedWindow (mkIdentifier (IdHeader "X-Client-ID")) Nothing
+  let throttle = ThrottleConfig 2 60 FixedWindow (IdHeader "X-Client-ID") Nothing
   env' <- addThrottle env "many-clients" throttle
   let app = attackMiddleware env' mockApp
   let makeClientRequest :: Integer -> Request
@@ -874,21 +877,22 @@ testAlgorithmPerformance :: Assertion
 testAlgorithmPerformance = do
   let algorithms = [FixedWindow, SlidingWindow, TokenBucket, LeakyBucket, TinyLRU]
   results <- mapM (\algo -> do
-    env <- initConfig (const defaultIPZone)
-    let throttle = ThrottleConfig 100 60 algo (mkIdentifier IdIP) (Just 120)
-    env' <- addThrottle env ("perf-" <> T.pack (show algo)) throttle
-    let start = (0 :: Integer)
-    mapM_ (\_ -> instrument env' mkIPv4Request) [1..100 :: Integer]
-    let end = (1 :: Integer)
-    return (algo, end - start)) algorithms
+                     env <- initConfig (const defaultIPZone)
+                     let throttle = ThrottleConfig 100 60 algo IdIP (Just 120)
+                     env' <- addThrottle env ("perf-" <> T.pack (show algo)) throttle
+                     let start = (0 :: Integer)
+                     mapM_ (\_ -> instrument env' mkIPv4Request) [1..100 :: Integer]
+                     let end = (1 :: Integer)
+                     return (algo, end - start)
+                  ) algorithms
   assertEqual "All algorithms tested" (length algorithms) (length results)
 
 -- | Tests memory usage with many zones.
 testManyZones :: Assertion
 testManyZones = do
   env <- initConfig (\req ->
-    maybe "default" TE.decodeUtf8 (lookup (mk "X-Zone-ID") (requestHeaders req)))
-  let throttle = ThrottleConfig 5 60 FixedWindow (mkIdentifier IdIP) Nothing
+                      maybe "default" TE.decodeUtf8 (lookup (mk "X-Zone-ID") (requestHeaders req)))
+  let throttle = ThrottleConfig 5 60 FixedWindow IdIP Nothing
   env' <- addThrottle env "zones" throttle
   let makeZoneRequest :: Integer -> Request
       makeZoneRequest i = mkRequestWithHeader "X-Zone-ID" (T.pack $ "zone" <> show i)
@@ -898,54 +902,151 @@ testManyZones = do
   assertBool "Many zones created" (zoneCount > 10)
   assertBool "Reasonable zone count" (zoneCount <= 51)
 
--- * Property-Based Tests
+-- * Property-Based Tests (Fixed Version)
 
--- | Generates valid token characters per RFC 6265 (simplified).
-validTokenChar :: Gen Char
-validTokenChar = elements $ ['!'..'~'] >>= \c ->
-  if c `elem` [';', ',', '=', ' '] then [] else [c]
+-- | Generates valid cookie value characters (excluding problematic ones for Web.Cookie)
+validCookieValueChar :: Gen Char
+validCookieValueChar = elements $ concat
+  [ ['!']
+  , ['#'..'&']
+  , ['('..'/']
+  , ['0'..'9']
+  , [':'] -- Split the range to exclude ';'
+  , ['<'..'@']
+  , ['A'..'Z']
+  , ['['..'`']
+  , ['a'..'z']
+  , ['{'..'~']
+  ]
+  -- Excludes: '"', ';', ',', '=', ' ', '\t', '\n', '\r' and control chars
 
--- | Generates a valid token text.
-tokenText :: Gen Text
-tokenText = T.pack <$> listOf1 validTokenChar
+-- | Generates valid cookie name characters (stricter than values)
+validCookieNameChar :: Gen Char
+validCookieNameChar = elements $ ['A'..'Z'] ++ ['a'..'z'] ++ ['0'..'9'] ++ ['!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~']
 
--- | Generates a valid cookie value text.
-cookieValueText :: Gen Text
-cookieValueText = T.pack <$> listOf1 validTokenChar
+-- | Generates a valid cookie name.
+cookieName :: Gen Text
+cookieName = T.pack <$> listOf1 validCookieNameChar
 
--- | Tests cookie extraction properties.
+-- | Generates a valid cookie value (no quotes, semicolons, etc.)
+cookieValue :: Gen Text
+cookieValue = T.pack <$> listOf1 validCookieValueChar
+
+-- | Tests cookie extraction properties with proper cookie format.
 propCookieExtraction :: Property
 propCookieExtraction =
-  forAll tokenText $ \cookieName ->
-  forAll cookieValueText $ \cookieValue ->
-    let header = TE.encodeUtf8 (cookieName <> "=" <> cookieValue)
-        extracted = extractCookieWC cookieName header
-    in extracted === Just cookieValue
+  forAll cookieName $ \name ->
+  forAll cookieValue $ \value ->
+  let header = TE.encodeUtf8 (name <> "=" <> value)
+      extracted = extractCookieWC name header
+  in counterexample ("Header: " <> show header <> ", Expected: " <> show value <> ", Got: " <> show extracted) $
+       extracted === Just value
 
--- | Tests header name round-trip.
+-- | Property test for cookie extraction with multiple cookies
+propCookieExtractionMultiple :: Property
+propCookieExtractionMultiple =
+  forAll cookieName $ \targetName ->
+  forAll cookieValue $ \targetValue ->
+  forAll (listOf ((,) <$> cookieName <*> cookieValue)) $ \otherCookies ->
+  let allCookies = (targetName, targetValue) : otherCookies
+      headerValue = T.intercalate "; " $ map (\(n, v) -> n <> "=" <> v) allCookies
+      header = TE.encodeUtf8 headerValue
+      extracted = extractCookieWC targetName header
+  in counterexample ("Header: " <> show headerValue <> ", Expected: " <> show targetValue <> ", Got: " <> show extracted) $
+       extracted === Just targetValue
+
+-- | Tests header name round-trip with valid header characters only.
 propHeaderNameRoundTrip :: Property
-propHeaderNameRoundTrip = property $ \headerText ->
-  let originalTxt = T.pack headerText
+propHeaderNameRoundTrip =
+  forAll (listOf1 validHeaderChar) $ \headerChars ->
+  let originalTxt = T.pack headerChars
       headerName = hdr originalTxt
       roundTrip = TE.decodeUtf8 (fromHeaderName headerName)
-  in not (T.null originalTxt) ==> roundTrip === originalTxt
+  in counterexample ("Original: " <> show originalTxt <> ", RoundTrip: " <> show roundTrip) $
+       roundTrip === originalTxt
+  where
+    -- Valid HTTP header name characters per RFC 7230
+    validHeaderChar :: Gen Char
+    validHeaderChar = elements $ concat
+      [ ['!']
+      , ['#'..'\'']
+      , ['*', '+', '-', '.']
+      , ['0'..'9']
+      , ['A'..'Z']
+      , ['^'..'z']
+      , ['|', '~']
+      ]
 
--- | Tests IP extraction consistency.
+-- | Tests IP extraction consistency with valid IP formats.
 propIPExtraction :: Property
-propIPExtraction = property $ \ipStr ->
-  let ip = T.pack ipStr
-      req = mkRequestWithXFF ip
+propIPExtraction =
+  forAll genValidIP $ \ip ->
+  let req = mkRequestWithXFF ip
       extracted = getClientIPPure req
       expected = T.takeWhile (/= ',') ip
-  in not (T.null ip) ==> extracted === expected
+  in counterexample ("IP: " <> show ip <> ", Expected: " <> show expected <> ", Got: " <> show extracted) $
+       extracted === expected
+  where
+    genValidIP = oneof [genIPv4, genIPv6, genIPv4List]
 
--- | Tests rate limiting monotonicity.
+    genIPv4 = do
+      a <- choose (1, 255) :: Gen Int
+      b <- choose (0, 255)
+      c <- choose (0, 255)
+      d <- choose (0, 255)
+      -- Corrected: Convert each number to Text before intercalating.
+      return $ T.intercalate "." $ map (T.pack . show) [a, b, c, d]
+
+    genIPv6 = do
+      segments <- replicateM 8 (choose (0, 65535 :: Int))
+      -- Corrected: Convert each formatted hex string to Text before intercalating.
+      return $ T.intercalate ":" $ map (T.pack . printf "%x") segments
+
+    genIPv4List = do
+      ips <- listOf1 genIPv4
+      return $ T.intercalate ", " ips
+
+-- | Tests rate limiting monotonicity - more requests should never result in fewer blocks.
 propRateLimitingMonotonicity :: Property
-propRateLimitingMonotonicity = property $ \limit period ->
-  limit > 0 && period > 0 ==> monadicIO $ do
+propRateLimitingMonotonicity =
+  forAll (choose (1, 100)) $ \limit ->
+  forAll (choose (1, 3600)) $ \period ->
+  monadicIO $ do
     env <- run $ initConfig (const defaultIPZone)
-    let throttle = ThrottleConfig limit period FixedWindow (mkIdentifier IdIP) Nothing
+    let throttle = ThrottleConfig limit period FixedWindow IdIP Nothing
     env' <- run $ addThrottle env "prop" throttle
-    results <- run $ mapM (\_ -> instrument env' mkIPv4Request) [1..limit]
-    let blockedCount = length $ filter id results
-    Test.QuickCheck.Monadic.assert (blockedCount < limit)
+    -- Test with exactly limit requests
+    results1 <- run $ mapM (\_ -> instrument env' mkIPv4Request) [1..limit]
+    let blockedCount1 = length $ filter id results1
+    -- Reset and test with limit + 1 requests
+    run $ cacheResetAll env'
+    results2 <- run $ mapM (\_ -> instrument env' mkIPv4Request) [1..limit + 1]
+    let blockedCount2 = length $ filter id results2
+    -- Monotonicity: more requests should result in more (or equal) blocks
+    Test.QuickCheck.Monadic.assert (blockedCount2 >= blockedCount1)
+    -- First batch should allow all requests within limit
+    Test.QuickCheck.Monadic.assert (blockedCount1 == 0)
+    -- Second batch should block at least one request
+    Test.QuickCheck.Monadic.assert (blockedCount2 >= 1)
+
+-- | Tests that different identifiers are treated independently
+propIdentifierIndependence :: Property
+propIdentifierIndependence =
+  -- Removed unused cookieName generators
+  forAll cookieValue $ \cookieValue1 ->
+  forAll cookieValue $ \cookieValue2 ->
+  -- This precondition ensures the two identifiers are actually different.
+  cookieValue1 /= cookieValue2 ==> monadicIO $ do
+    env <- run $ initConfig (const defaultIPZone)
+    let throttle = ThrottleConfig 1 60 FixedWindow (IdCookie "session") Nothing
+    env' <- run $ addThrottle env "test" throttle
+    let req1 = mkRequestWithCookie "session" cookieValue1
+    let req2 = mkRequestWithCookie "session" cookieValue2
+    -- Both different session values should be allowed initially
+    blocked1 <- run $ instrument env' req1
+    blocked2 <- run $ instrument env' req2
+    Test.QuickCheck.Monadic.assert (not blocked1)
+    Test.QuickCheck.Monadic.assert (not blocked2)
+    -- Second request with same session should be blocked
+    blocked1_2 <- run $ instrument env' req1
+    Test.QuickCheck.Monadic.assert blocked1_2
