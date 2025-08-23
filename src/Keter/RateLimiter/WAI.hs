@@ -35,7 +35,7 @@ multiple algorithms:
 Key points
 ----------
 
-- Plugin-friendly construction: build an environment once (Env) from 'RateLimiterConfig'
+- Plugin-friendly construction: build an environment once ('Env') from 'RateLimiterConfig'
   and produce a pure WAI 'Middleware'. This matches common WAI patterns and avoids
   per-request setup or global mutable state.
 
@@ -45,7 +45,7 @@ Key points
 - Zone-specific caches: per-IP-zone caches are stored in a HashMap keyed by zone
   identifiers. Zones are derived from a configurable strategy ('ZoneBy'), with a default.
 
-- No global caches in Keter: you can build one Env per compiled middleware chain
+- No global caches in Keter: you can build one 'Env' per compiled middleware chain
   and cache that chain externally (e.g., per-vhost + middleware-list), preserving
   counters/windows across requests.
 
@@ -64,7 +64,7 @@ let cfg = RateLimiterConfig
       }
 @
 
-2) Build Env once and obtain a pure Middleware:
+2) Build 'Env' once and obtain a pure 'Middleware':
 
 @
 env <- buildEnvFromConfig cfg
@@ -78,6 +78,74 @@ Alternatively:
 mw <- buildRateLimiter cfg  -- convenience: Env creation + Middleware
 app = mw baseApplication
 @
+
+Usage patterns
+--------------
+
+__Declarative approach (recommended):__
+
+@
+import Keter.RateLimiter.WAI
+import Keter.RateLimiter.Cache (Algorithm(..))
+
+main = do
+  let config = RateLimiterConfig
+        { rlZoneBy = ZoneIP
+        , rlThrottles = 
+            [ RLThrottle "api" 100 3600 FixedWindow IdIP Nothing
+            ]
+        }
+  middleware <- buildRateLimiter config
+  let app = middleware baseApp
+  run 8080 app
+@
+
+__Programmatic approach (advanced):__
+
+@
+import Keter.RateLimiter.WAI
+import Keter.RateLimiter.Cache (Algorithm(..))
+
+main = do
+  env <- initConfig (\\req -> "zone1")
+  let throttleConfig = ThrottleConfig
+        { throttleLimit = 100
+        , throttlePeriod = 3600
+        , throttleAlgorithm = FixedWindow
+        , throttleIdentifierBy = IdIP
+        , throttleTokenBucketTTL = Nothing
+        }
+  env' <- addThrottle env "api" throttleConfig
+  let middleware = buildRateLimiterWithEnv env'
+      app = middleware baseApp
+  run 8080 app
+@
+
+Configuration reference
+-----------------------
+
+__Client identification strategies ('IdentifierBy'):__
+
+- 'IdIP' - Identify by client IP address
+- 'IdIPAndPath' - Identify by IP address and request path
+- 'IdIPAndUA' - Identify by IP address and User-Agent header
+- @'IdHeader' headerName@ - Identify by custom header value
+- @'IdCookie' cookieName@ - Identify by cookie value
+- @'IdHeaderAndIP' headerName@ - Identify by header value combined with IP
+
+__Zone derivation strategies ('ZoneBy'):__
+
+- 'ZoneDefault' - All requests use the same cache (no zone separation)
+- 'ZoneIP' - Separate zones by client IP address
+- @'ZoneHeader' headerName@ - Separate zones by custom header value
+
+__Rate limiting algorithms:__
+
+- 'FixedWindow' - Traditional fixed-window counting
+- 'SlidingWindow' - Precise sliding-window with timestamp tracking
+- 'TokenBucket' - Allow bursts up to capacity, refill over time
+- 'LeakyBucket' - Smooth rate limiting with configurable leak rate
+- 'TinyLRU' - Least-recently-used eviction for memory efficiency
 
 -}
 
@@ -93,10 +161,10 @@ module Keter.RateLimiter.WAI
   , addThrottle
 
     -- * Middleware
-  , attackMiddleware         -- low-level: apply throttling with an existing Env
-  , buildRateLimiter         -- convenience: build Env from config, return Middleware
-  , buildRateLimiterWithEnv  -- preferred: pure Middleware from a pre-built Env
-  , buildEnvFromConfig       -- build Env once from RateLimiterConfig
+  , attackMiddleware         -- ^ Low-level: apply throttling with an existing 'Env'
+  , buildRateLimiter         -- ^ Convenience: build 'Env' from config, return 'Middleware'
+  , buildRateLimiterWithEnv  -- ^ Preferred: pure 'Middleware' from a pre-built 'Env'
+  , buildEnvFromConfig       -- ^ Build 'Env' once from 'RateLimiterConfig'
 
     -- * Manual Control & Inspection
   , instrument
@@ -130,7 +198,7 @@ import Network.Socket (SockAddr (..))
 import Network.Wai
 import qualified Web.Cookie as WC
 
--- SOLUTION: Import Cache with hiding Algorithm to avoid conflict, then import Algorithm explicitly
+-- Import Cache with hiding Algorithm to avoid conflict, then import Algorithm explicitly
 import Keter.RateLimiter.Cache hiding (Algorithm)
 import Keter.RateLimiter.Cache (Algorithm(..))
 import Keter.RateLimiter.CacheWithZone (allowFixedWindowRequest)
@@ -150,9 +218,6 @@ import Data.Time.Clock.POSIX (getPOSIXTime)
 
 --------------------------------------------------------------------------------
 -- Configuration and Environment
-
--- SOLUTION: Use the Algorithm from Cache module, don't redefine it
--- type Algorithm = Cache.Algorithm  -- Remove this line since we import directly
 
 -- | Runtime throttle parameters assembled from declarative configuration.
 --
@@ -175,8 +240,8 @@ data ThrottleConfig = ThrottleConfig
 
 -- | Thread-safe, shared state for rate limiting.
 --
--- Concurrency model
--- -----------------
+-- = Concurrency model
+--
 -- - Uses 'TVar' from STM for in-memory HashMaps.
 -- - Safe for green-threaded request handlers.
 -- - No global variables: construct 'Env' in your wiring/bootstrap and reuse it.
@@ -278,7 +343,7 @@ checkThrottleWithIdent caches zone _req throttleName cfg mIdentifier =
     Nothing    -> pure False
     Just ident ->
       case throttleAlgorithm cfg of
-        -- SOLUTION: Use unqualified Algorithm constructors since we imported them explicitly
+        -- Use unqualified Algorithm constructors since we imported them explicitly
         FixedWindow ->
           -- allowFixedWindowRequest cache throttleName zone ident limit period
           not <$> allowFixedWindowRequest

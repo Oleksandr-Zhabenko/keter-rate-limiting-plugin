@@ -128,12 +128,13 @@ import Keter.RateLimiter.WAI
 import Keter.RateLimiter.Cache (Algorithm(..))
 import Keter.RateLimiter.IPZones (defaultIPZone)
 import Data.Text.Encoding (encodeUtf8)
+import Network.HTTP.Types (hHost)
 
 main :: IO ()
 main = do
   -- 1. Initialize environment with custom zone logic
   env <- initConfig $ \req -> 
-    case requestHeaderHost req of
+    case lookup hHost (requestHeaders req) of
       Just "api.example.com" -> "api_zone"
       Just "admin.example.com" -> "admin_zone"
       _ -> defaultIPZone
@@ -143,7 +144,7 @@ main = do
         { throttleLimit      = 1000
         , throttlePeriod     = 3600
         , throttleAlgorithm  = FixedWindow
-        , throttleIdentifier = \req -> fmap (encodeUtf8 . show) (remoteHost req)
+        , throttleIdentifierBy = IdIP
         , throttleTokenBucketTTL = Nothing
         }
 
@@ -151,7 +152,7 @@ main = do
         { throttleLimit      = 5
         , throttlePeriod     = 300
         , throttleAlgorithm  = TokenBucket
-        , throttleIdentifier = \req -> fmap (encodeUtf8 . show) (remoteHost req)
+        , throttleIdentifierBy = IdIP
         , throttleTokenBucketTTL = Just 600
         }
 
@@ -170,18 +171,18 @@ main = do
 
 ### Client Identification Strategies (`IdentifierBy`)
 
-- `"ip"` - Identify by client IP address
-- `"ip+path"` - Identify by IP address and request path
-- `"ip+ua"` - Identify by IP address and User-Agent header
-- `{"header": "X-API-Key"}` - Identify by custom header value
-- `{"cookie": "session_id"}` - Identify by cookie value
-- `{"header+ip": "X-User-ID"}` - Identify by header value combined with IP
+- `IdIP` - Identify by client IP address
+- `IdIPAndPath` - Identify by IP address and request path
+- `IdIPAndUA` - Identify by IP address and User-Agent header
+- `IdHeader headerName` - Identify by custom header value
+- `IdCookie "session_id"` - Identify by cookie value
+- `IdHeaderAndIP headerName` - Identify by header value combined with IP
 
 ### Zone Derivation Strategies (`ZoneBy`)
 
-- `"default"` - All requests use the same cache (no zone separation)
-- `"ip"` - Separate zones by client IP address
-- `{"header": "X-Tenant-ID"}` - Separate zones by custom header value
+- `ZoneDefault` - All requests use the same cache (no zone separation)
+- `ZoneIP` - Separate zones by client IP address
+- `ZoneHeader headerName` - Separate zones by custom header value
 
 ### Rate Limiting Algorithms
 
@@ -233,12 +234,12 @@ mVal <- readCache cache customKey :: IO (Maybe Int)
 
 ```haskell
 let config = RateLimiterConfig
-      { rlZoneBy = ZoneHeader "X-Tenant-ID"  -- Separate by tenant
+      { rlZoneBy = ZoneHeader (hdr "X-Tenant-ID")  -- Separate by tenant
       , rlThrottles = 
           [ RLThrottle "api_burst"     100  60   TokenBucket   IdIP              (Just 300)
           , RLThrottle "api_sustained" 1000 3600 FixedWindow   IdIP              Nothing
           , RLThrottle "login"         5    300  LeakyBucket   IdIP              Nothing
-          , RLThrottle "admin"         50   3600 SlidingWindow (IdHeader "X-Admin-Key") Nothing
+          , RLThrottle "admin"         50   3600 SlidingWindow (IdHeader (hdr "X-Admin-Key")) Nothing
           , RLThrottle "lru_cache"     1000 60   TinyLRU       IdIPAndPath       Nothing
           ]
       }
@@ -295,7 +296,7 @@ let config = RateLimiterConfig { ... }
 middleware <- buildRateLimiter config
 ```
 
-The old programmatic API is still fully supported for advanced use cases.
+The old programmatic API is still fully supported for advanced use cases via `buildRateLimiterWithEnv` and related functions.
 
 ## License
 

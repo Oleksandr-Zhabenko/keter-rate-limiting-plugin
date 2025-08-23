@@ -57,7 +57,7 @@ import Network.Wai
 import Network.Wai.Test
 import Network.HTTP.Types
 import Network.Socket (SockAddr(..), tupleToHostAddress)
-import Data.Text (Text, intercalate)
+import Data.Text (Text)
 import Control.Concurrent.STM (readTVarIO)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -240,6 +240,7 @@ propertyBasedTests = testGroup "Property-Based Tests"
   , testProperty "Header name round-trip" propHeaderNameRoundTrip
   , testProperty "IP extraction consistency" propIPExtraction
   , testProperty "Rate limiting monotonicity" propRateLimitingMonotonicity
+  , testProperty "Cookie extraction multiple" propCookieExtractionMultiple
   , testProperty "Identifier independence" propIdentifierIndependence
   ]
 
