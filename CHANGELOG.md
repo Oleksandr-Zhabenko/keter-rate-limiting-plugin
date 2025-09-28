@@ -24,3 +24,6 @@
 
 * Second version. Changed Keter.RateLimiter.WAI module to remove multiple times computed data while working on the advice of @jappeace for keter integration and to prevent potential memory leak when keter reloads configuration. 
 
+## 0.2.0.1 -- 2025-09-28
+
+* Second version revised A. Updated documentation in README.md to include basic information on keter integration (expected in the keter-2.3.0). 

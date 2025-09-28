@@ -194,7 +194,227 @@ main = do
 
 ## Example Usage
 
-### Using the Convenient API
+## For the Keter Users (is expected to be introduced in keter-2.3.0, see the README there
+and / or Changelog file)
+
+### Important notes
+
+Configure middleware in app bundles (config/keter.yaml), 
+not in the global Keter daemon config. The global keter-config.yaml 
+remains for listeners, TLS, ip-from-header, healthcheck-path, etc. 
+Requests to healthcheck-path are never rate-limited.
+
+### Quick Start
+
+Attach a rate-limiter to any stanza via a middleware list.
+
+Example bundle config (config/keter.yaml):
+
+```yaml
+stanzas:
+  - type: webapp
+    exec: ./my-app
+    hosts: ["www.example.com"]
+    middleware:
+      - rate-limiter:
+          zone_by: default
+          throttles:
+            - name: "ip-basic"
+              limit: 100
+              period: 60
+              algorithm: FixedWindow
+              identifier_by: ip
+
+  - type: reverse-proxy
+    hosts: ["api.example.com"]
+    to: "http://127.0.0.1:9000"
+    middleware:
+      - rate-limiter:
+          zone_by: { header: "X-Tenant-ID" }
+          throttles:
+            - name: "tenant-api"
+              limit: 1000
+              period: 3600
+              algorithm: SlidingWindow
+              identifier_by: { header: "X-Api-Key" }
+
+  - type: static-files
+    hosts: ["static.example.com"]
+    root: ./static
+    middleware:
+      - rate-limiter:
+          zone_by: ip
+          throttles:
+            - name: "static-ip"
+              limit: 300
+              period: 60
+              algorithm: LeakyBucket
+              identifier_by: ip
+```
+
+Tip: You can stack multiple middleware blocks if you need 
+different protections. They run in order.
+
+### Field Reference
+
+* `rate-limiter`: top-level middleware key.
+* `zone_by`:
+  1. `"default"`: counters are isolated per vhost (Host header). Good per-domain isolation.
+  2. `"ip"`: counters are isolated per client IP zone. Good for IP fairness.
+  3. `{ "header": "X-Header" }`: per-tenant/customer isolation via a header value.
+* `throttles`: list of rules. Each rule:
+  1. `name`: a label for logs/metrics.
+  2. `limit`: integer capacity or max requests.
+  3. `period`: seconds (window or refill/leak interval depending on algorithm).
+  4. `algorithm`: one of `FixedWindow | SlidingWindow | TokenBucket | LeakyBucket | TinyLRU`.
+  5. `identifier_by`:
+     * `"ip"`: identify by client IP (honors global ip-from-header).
+     * `"ip+path"`: combine IP and path for path-specific throttles (e.g., /login).
+     * `"ip+ua"`: combine IP and User-Agent.
+     * `{ "header": "X-User" }`: identify by a header value.
+     * `{ "cookie": "session" }`: identify by a cookie value.
+     * `{ "header+ip": "X-Key" }`: combine header and IP.
+  6. `token_bucket_ttl`: optional seconds; TokenBucket only (evicts idle buckets).
+
+### Choosing Algorithms
+
+Rule of thumb for common scenarios:
+
+* **FixedWindow**
+  1. When: Simple quotas (e.g., 100 req/min per IP).
+  2. Pros: Simple, low overhead.
+  3. Cons: Window boundary bursts possible.
+  4. Use for: Public pages, basic protections.
+
+* **SlidingWindow**
+  1. When: Smoother enforcement over time; avoid boundary spikes.
+  2. Pros: More accurate rolling rate.
+  3. Cons: More state churn than FixedWindow.
+  4. Use for: API endpoints where fairness matters.
+
+* **TokenBucket**
+  1. When: Allow short bursts but control average rate.
+  2. Pros: Classic API limiter; bursty but bounded.
+  3. Cons: Requires sensible period; consider TTL for idle buckets.
+  4. Use for: Developer APIs, webhook receivers.
+  5. Tip: Set token_bucket_ttl (e.g., 1800s) to evict idle buckets.
+
+* **LeakyBucket**
+  1. When: Smooth out bursts to a steady outflow.
+  2. Pros: Predictable, backpressure-like effect.
+  3. Cons: Tuning capacity vs leak rate.
+  4. Use for: Form submissions, login attempts.
+
+* **TinyLRU**
+  1. When: Lightweight micro-throttling with tiny memory footprint.
+  2. Pros: Very small, simple.
+  3. Cons: Coarser control than others.
+  4. Use for: Edge micro-protection, complementary limits.
+
+### Practical Patterns
+
+* Path-specific throttles (e.g., login):
+
+```yaml
+middleware:
+  - rate-limiter:
+      zone_by: default
+      throttles:
+        - name: "login"
+          limit: 5
+          period: 60
+          algorithm: SlidingWindow
+          identifier_by: ip+path
+```
+
+* API key quotas per tenant:
+
+```yaml
+middleware:
+  - rate-limiter:
+      zone_by: { header: "X-Tenant-ID" }
+      throttles:
+        - name: "tenant-quota"
+          limit: 1000
+          period: 3600
+          algorithm: TokenBucket
+          identifier_by: { header: "X-Api-Key" }
+          token_bucket_ttl: 1800
+```
+
+* Mixed protections on the same host:
+
+```yaml
+middleware:
+  - rate-limiter:
+      zone_by: default
+      throttles:
+        - { name: "global-ip", limit: 600, period: 600, algorithm: FixedWindow, identifier_by: ip }
+  - rate-limiter:
+      zone_by: default
+      throttles:
+        - { name: "login", limit: 5, period: 60, algorithm: SlidingWindow, identifier_by: ip+path }
+```
+
+* Static assets fairness:
+
+```yaml
+- type: static-files
+  hosts: ["cdn.example.com"]
+  root: ./public
+  middleware:
+    - rate-limiter:
+        zone_by: ip
+        throttles:
+          - { name: "cdn-ip", limit: 300, period: 60, algorithm: LeakyBucket, identifier_by: ip }
+```
+
+### Global keter daemon settings impacting behavior (keter-config.yaml):
+
+* `ip-from-header`: influences throttles with `identifier_by: ip`.
+* `healthcheck-path`: this path is always allowed and never rate-limited.
+
+
+### Operational Tips
+
+* Start with SlidingWindow or TokenBucket for APIs; FixedWindow 
+for simple pages; add a strict path-specific rule for sensitive 
+endpoints (/login, /password-reset).
+* Tune limit/period to real traffic; prefer longer periods with 
+proportionally larger limits for smoother behavior.
+* If behind a load balancer/proxy, set ip-from-header: true 
+in keter-config.yaml to honor X-Forwarded-For.
+* Keep healthcheck-path simple (e.g., /keter-health); it's always 
+bypassed by the limiter.
+* For multi-tenant apps, use zone_by: { header: "X-Tenant-ID" } 
+so each tenant's counters are isolated; pair with header/cookie 
+identifiers that match your auth.
+* Use token_bucket_ttl to bound memory for TokenBucket.
+* Stacking throttles is common; the most restrictive one effectively 
+governs.
+* Consider integrating limiter notifications with your logging/metrics.
+
+### FAQ
+
+* **Should I configure middleware in the global Keter config?**
+
+No. Middleware is per-app in bundles (config/keter.yaml). The global file 
+configures listeners, TLS, ip-from-header, and healthcheck-path.
+
+* **Does it work with HTTPS and multiple listeners?**
+
+Yes. The middleware is applied uniformly; rate limiting is agnostic 
+to scheme.
+
+* **How do vhosts interact with rate limits?**
+
+With zone_by: default, counters are isolated per Host. Different hosts 
+pointing to the same backend port don't share counters.
+
+If you'd like help choosing safe defaults for your workloads, open 
+an issue with a brief description of your traffic patterns and endpoints.
+
+## Using the Convenient API
 
 The `CacheWithZone` module provides helpers that automatically compose cache keys from the algorithm, zone, and user key, simplifying common use cases while leveraging efficient HashMap-based zone lookups.
 
@@ -213,7 +433,7 @@ let cache = newCache FixedWindow fixedWindowStore
 isAllowed <- allowFixedWindowRequest cache "zoneX" "userX" 100 3600 -- 100 requests per hour
 ```
 
-### Using the Customizable API
+## Using the Customizable API
 
 For more complex scenarios, you can manually construct cache keys and interact directly with the `Cache` module. This gives you full control over the key structure while still benefiting from HashMap-optimized storage.
 
