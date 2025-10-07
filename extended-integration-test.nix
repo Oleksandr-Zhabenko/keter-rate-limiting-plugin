@@ -63,81 +63,14 @@ pkgs.testers.runNixOSTest {
           fi
           echo "Compilation test passed" >&2
 
-          HASKELL_FILE=$(mktemp /tmp/app.XXXXXX.hs)
-          echo "Created Haskell file: $HASKELL_FILE" >&2
-          cat > "$HASKELL_FILE" << 'HASKELL_EOF'
-{-# LANGUAGE OverloadedStrings #-}
-import Network.Wai
-import Network.Wai.Handler.Warp (run)
-import Network.HTTP.Types (status200)
-import System.Environment (lookupEnv)
-import Text.Read (readMaybe)
-import qualified Data.Text as T
-import qualified Data.Text.Encoding as TE
-import Data.Maybe (fromMaybe, listToMaybe)
-import Data.List (find)
-import Data.CaseInsensitive (mk)
-import Network.Socket (SockAddr(..))
-import qualified Data.ByteString.Char8 as B8
-import qualified Data.ByteString.Lazy.Char8 as LBS
-import Control.Monad (guard)
-
-import Keter.RateLimiter.WAI
-  ( attackMiddleware, Env, initConfig, addThrottle, ThrottleConfig(..), IdentifierBy(..))
-import Keter.RateLimiter.Cache (Algorithm(..))
-import Keter.RateLimiter.IPZones (IPZoneIdentifier, defaultIPZone)
-
-getClientIdentifier :: Request -> IO (Maybe T.Text)
-getClientIdentifier req = pure . Just $ fromMaybe (fallbackIP req) (findClientIP req)
-  where
-    findClientIP :: Request -> Maybe T.Text
-    findClientIP r = listToMaybe $ do
-      (headerName, headerValue) <- requestHeaders r
-      guard $ headerName `elem` [mk "x-forwarded-for", mk "x-real-ip"]
-      pure . T.strip . fst . T.breakOn "," $ TE.decodeUtf8 headerValue
-
-    fallbackIP :: Request -> T.Text
-    fallbackIP = T.pack . show . remoteHost
-
-getRequestIPZone :: Request -> IPZoneIdentifier
-getRequestIPZone _ = defaultIPZone
-
-main :: IO ()
-main = do
-  portStr <- lookupEnv "PORT"
-  let port = maybe 8080 id (portStr >>= readMaybe)
-
-  env <- initConfig getRequestIPZone
-
-  let throttleConfig = ThrottleConfig
-        { throttleLimit        = 4
-        , throttlePeriod       = 10
-        , throttleAlgorithm    = FixedWindow
-        , throttleIdentifierBy = IdIP
-        , throttleTokenBucketTTL = Nothing
-        }
-
-  envWithThrottle <- addThrottle env "test-throttle" throttleConfig
-
-  putStrLn $ "Starting Haskell Warp server on port " ++ show port
-  run port (attackMiddleware envWithThrottle baseApp)
-
-baseApp :: Application
-baseApp req respond = do
-  mIdentifier <- getClientIdentifier req
-  putStrLn $ "Received request from " ++ T.unpack (fromMaybe "unknown" mIdentifier)
-
-  respond $ responseLBS
-    status200
-    [("Content-Type", "text/plain")]
-    "Hello from a Haskell/WAI/Warp application with rate limiting!"
-HASKELL_EOF
-
-          echo "Starting Haskell application from file: $HASKELL_FILE" >&2
+          echo "Copying extended test application" >&2
+          cp ${./test/ExtendedTestApp.hs} /tmp/app.hs
+          
+          echo "Starting Haskell application from file: /tmp/app.hs" >&2
           echo "File contents:" >&2
-          cat "$HASKELL_FILE" >&2
-          echo "Running runghc $HASKELL_FILE" >&2
-          if ! runghc "$HASKELL_FILE" 2>&1 | tee -a /tmp/app.log >&2; then
+          cat /tmp/app.hs >&2
+          echo "Running runghc /tmp/app.hs" >&2
+          if ! runghc /tmp/app.hs 2>&1 | tee -a /tmp/app.log >&2; then
             echo "runghc failed with exit code $?" >&2
             cat /tmp/app.log >&2
             exit 1
@@ -204,10 +137,10 @@ HASKELL_EOF
     print(output)
     assert "Starting Haskell Warp server on port" in output, "Haskell app did not start correctly"
 
-    print("=== Checking temporary Haskell file ===")
-    _, output = machine.execute("ls -l /tmp/app.*.hs 2>/dev/null || echo 'no Haskell source file found'")
+    print("=== Checking Haskell source file ===")
+    _, output = machine.execute("ls -l /tmp/app.hs 2>/dev/null || echo 'no Haskell source file found'")
     print(output)
-    assert "no Haskell source file found" not in output, "Haskell source file /tmp/app.*.hs was not created"
+    assert "no Haskell source file found" not in output, "Haskell source file /tmp/app.hs was not created"
 
     print("=== Checking for errors in keter logs ===")
     _, output = machine.execute("journalctl -u keter.service --no-pager | grep -i -E '(error|fail|exception)' | tail -20 || echo 'no errors found in logs'")
@@ -310,8 +243,7 @@ HASKELL_EOF
     assert failure_count == 1
 
     print("=== Testing concurrent requests (moderate) ===")
-    machine.succeed("sleep 10") # Ensure the rate limit is reset
-    # Run 6 requests in the background, expecting 4 successes and 2 failures (rate-limited)
+    machine.succeed("sleep 10")
     output = machine.succeed("bash -lc 'for i in $(seq 1 6); do curl -s -o /dev/null -w \"%{http_code}\" -H \"Host: localhost\" http://localhost:81 & done; wait'")
     success_count = output.count("200")
     failure_count = output.count("429")
@@ -321,8 +253,7 @@ HASKELL_EOF
     print("=== Testing DoS-like concurrent requests ===")
     machine.succeed("sleep 10")
     machine.succeed('echo "" > /tmp/app.log')
-    machine.succeed ( "bash -lc 'for i in $(seq 1 20); do curl -s -o /dev/null -H \"Host: localhost\" http://localhost:${toString port} & done; wait'"
-    )
+    machine.succeed("bash -lc 'for i in $(seq 1 20); do curl -s -o /dev/null -H \"Host: localhost\" http://localhost:${toString port} & done; wait'")
     machine.succeed("sleep 2")
     _, output = machine.execute('grep -c "Received request from" /tmp/app.log')
     success_count = int(output.strip())

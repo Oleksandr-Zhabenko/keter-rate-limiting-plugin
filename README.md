@@ -194,8 +194,7 @@ main = do
 
 ## Example Usage
 
-## For the Keter Users (is expected to be introduced in keter-2.3.0, see the README there
-and / or Changelog file)
+## For the Keter Users (is expected to be introduced in keter-2.3.0, see the README there and / or Changelog file)
 
 ### Important notes
 

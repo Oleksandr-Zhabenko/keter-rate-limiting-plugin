@@ -27,3 +27,8 @@
 ## 0.2.0.1 -- 2025-09-28
 
 * Second version revised A. Updated documentation in README.md to include basic information on keter integration (expected in the keter-2.3.0). 
+
+## 0.2.0.2 -- 2025-10-07
+
+* Second version revised B. Updated documentation in README.md. Fixed mixed stdout and stderr output in nix integration tests that could lead to failures.
+
